@@ -54,6 +54,15 @@ The live panel separates requested RPIs, Forward_Open actual intervals and socke
 
 ### CLI
 
+The console executable uses the same scanner and CSV writer as the GUI. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.
+
+```powershell
+.\target\release\eipmaster-cli.exe identity 127.0.0.1 127.0.0.1
+.\target\release\eipmaster-cli.exe capture samples\loopback.toml .\.local\console-capture 10 0:12:1
+```
+
+These examples target the localhost fixture. Before each example, start `python tools/loopback_adapter.py .local/adapter.json` in another console. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The deadline scheduler runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
+
 Use the capture prefix shown in the GUI to join the parts in order after stopping capture.
 
 ```powershell
@@ -78,6 +87,7 @@ Run the Rust tests and the loopback harness on Windows. The [verification notes]
 
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --locked --release
+python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\cli-check
 ```
 
 ## Maintainers

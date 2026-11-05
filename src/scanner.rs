@@ -30,7 +30,7 @@ fn protocol(message: impl Into<String>) -> EipError {
     EipError::Protocol(message.into())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Identity {
     pub vendor: u16,
     pub device_type: u16,
@@ -41,6 +41,14 @@ pub struct Identity {
     pub serial: u32,
     pub name: String,
 }
+pub type IdentityKey = (u16, u16, u16);
+
+impl Identity {
+    pub fn key(&self) -> IdentityKey {
+        (self.vendor, self.device_type, self.code)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct Spacing {
     pub intervals: u64,
@@ -139,6 +147,25 @@ impl Connection {
         schedule: Schedule,
         permit_writes: bool,
     ) -> std::result::Result<Self, String> {
+        Self::start_inner(settings, slot, generation, schedule, permit_writes, None)
+    }
+
+    pub fn start_verified_input(
+        settings: Settings,
+        slot: Slot,
+        expected: IdentityKey,
+    ) -> std::result::Result<Self, String> {
+        Self::start_inner(settings, slot, 1, Schedule::Deadline, false, Some(expected))
+    }
+
+    fn start_inner(
+        settings: Settings,
+        slot: Slot,
+        generation: u64,
+        schedule: Schedule,
+        permit_writes: bool,
+        expected: Option<IdentityKey>,
+    ) -> std::result::Result<Self, String> {
         settings.validate()?;
         if !permit_writes
             && (!settings.input_only || settings.config_size != 0 || settings.output_run_idle)
@@ -164,7 +191,14 @@ impl Connection {
         let worker = thread::Builder::new()
             .name("class1-session".into())
             .spawn(move || {
-                let result = run(&settings, &slot, generation, schedule, &mut shared);
+                let result = run(
+                    &settings,
+                    &slot,
+                    generation,
+                    schedule,
+                    expected,
+                    &mut shared,
+                );
                 let mut status = shared.status.lock().unwrap();
                 if let Err(error) = result {
                     status.state = "Error";
@@ -377,12 +411,36 @@ fn run(
     slot: &Slot,
     generation: u64,
     schedule: Schedule,
+    expected: Option<IdentityKey>,
     shared: &mut Shared,
 ) -> Result<()> {
     let mut session = Session::open(cfg)?;
     {
         let id = identity(&mut session);
         let mut state = shared.status.lock().unwrap();
+        if let Some(expected) = expected {
+            match id {
+                Ok(ref actual) if actual.key() != expected => {
+                    let message = format!(
+                        "Identity mismatch. Expected vendor:type:product {}:{}:{}, got {}:{}:{}",
+                        expected.0,
+                        expected.1,
+                        expected.2,
+                        actual.vendor,
+                        actual.device_type,
+                        actual.code
+                    );
+                    state.identity = Some(actual.clone());
+                    state.identity_error = Some(message.clone());
+                    return Err(protocol(message));
+                }
+                Err(ref error) => {
+                    state.identity_error = Some(error.to_string());
+                    return Err(protocol("Identity verification failed before Forward_Open"));
+                }
+                _ => {}
+            }
+        }
         match id {
             Ok(id) => state.identity = Some(id),
             Err(e @ EipError::Cip { .. }) => state.identity_error = Some(e.to_string()),

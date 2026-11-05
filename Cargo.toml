@@ -2,6 +2,7 @@
 name = "assembly-scanner"
 version = "0.1.1"
 edition = "2024"
+default-run = "assembly-scanner"
 description = "Windows EtherNet/IP Class 1 scanner and CSV assembly logger."
 license = "MIT"
 repository = "https://github.com/votecoffee/EIPMaster"
