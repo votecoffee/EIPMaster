@@ -1,0 +1,23 @@
+device_ip = "127.0.0.1"
+local_ip = "127.0.0.1"
+local_udp_port = 0
+input_instance = 101
+input_size = 4
+output_instance = 254
+output_size = 0
+config_instance = 1
+config_size = 0
+config_hex = ""
+output_hex = ""
+input_only = true
+output_run_idle = false
+input_run_idle = false
+output_priority = 1
+input_priority = 1
+output_rpi_us = 1000
+input_rpi_us = 1000
+
+[selection]
+offset = 0
+kind = "U32"
+big_endian = false

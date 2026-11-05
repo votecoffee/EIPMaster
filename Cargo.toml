@@ -1,0 +1,22 @@
+[package]
+name = "assembly-scanner"
+version = "0.1.1"
+edition = "2024"
+description = "Windows EtherNet/IP Class 1 scanner and CSV assembly logger."
+license = "MIT"
+repository = "https://github.com/votecoffee/EIPMaster"
+
+[dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["glow", "default_fonts"] }
+ethernetip-connections = "=0.1.1"
+ethernetip-core = "=0.1.1"
+socket2 = "0.6"
+crossbeam-queue = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt", "time"] }
+getrandom = "0.3"
+
+[profile.release]
+strip = true

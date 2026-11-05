@@ -1,0 +1,24 @@
+[File]
+DescText = "Assembly Scanner loopback fixture";
+[Device]
+VendCode = 0;
+ProdType = 12;
+ProdCode = 1;
+MajRev = 1;
+MinRev = 0;
+ProdName = "Loopback Adapter";
+[Params]
+Param1 = 0,,,0x0000,0xC8,4,"RPI","us","",1000,1000000,1000,,,,,,,,,;
+[Assembly]
+Assem101 = "Input", "20 04 24 65 30 03", 4, 0x0000,,,32,;
+[Connection Manager]
+Connection1 =
+    0x02010002,
+    0x22440305,
+    Param1,0,,
+    Param1,,Assem101,
+    ,,
+    0,,
+    "Loopback Input Only",
+    "",
+    "20 04 24 01 2C FE 2C 65";
