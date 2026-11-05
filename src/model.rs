@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
+pub const CAPTURE_METADATA: [&str; 6] = [
+    "capture_start_utc",
+    "elapsed_us",
+    "sample_index",
+    "connection_generation",
+    "packet_sequence",
+    "cip_sequence",
+];
+pub const MAX_CAPTURE_FIELDS: usize = 3;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -23,6 +33,8 @@ pub struct Settings {
     pub output_rpi_us: u32,
     pub input_rpi_us: u32,
     pub selection: Selection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_fields: Vec<CaptureField>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -43,6 +55,7 @@ impl Default for Settings {
             input_run_idle: false,
             output_priority: 1,
             input_priority: 1,
+            capture_fields: Vec::new(),
             output_rpi_us: 1000,
             input_rpi_us: 1000,
             selection: Selection {
@@ -118,7 +131,46 @@ impl Settings {
             return Err("Configuration bytes do not match the declared configuration size".into());
         }
         self.output()?;
-        self.selection.validate(self.input_size as usize)
+        self.selection.validate(self.input_size as usize)?;
+        self.csv_fields()?;
+        Ok(())
+    }
+
+    pub fn csv_fields(&self) -> Result<Vec<CaptureField>, String> {
+        if self.capture_fields.is_empty() {
+            self.selection.validate(self.input_size as usize)?;
+            return Ok(vec![CaptureField {
+                name: "value".into(),
+                selection: self.selection,
+            }]);
+        }
+        if self.capture_fields.len() > MAX_CAPTURE_FIELDS {
+            return Err(format!("Use at most {MAX_CAPTURE_FIELDS} capture fields"));
+        }
+        for (index, field) in self.capture_fields.iter().enumerate() {
+            let mut chars = field.name.chars();
+            if !chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(format!("Invalid capture field name {:?}", field.name));
+            }
+            if CAPTURE_METADATA
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&field.name))
+                || self.capture_fields[..index]
+                    .iter()
+                    .any(|other| other.name.eq_ignore_ascii_case(&field.name))
+            {
+                return Err(format!("Duplicate capture field name {:?}", field.name));
+            }
+            field
+                .selection
+                .validate(self.input_size as usize)
+                .map_err(|error| format!("{}: {error}", field.name))?;
+        }
+        Ok(self.capture_fields.clone())
     }
     pub fn output(&self) -> Result<Vec<u8>, String> {
         let data = parse_hex(&self.output_hex)?;
@@ -172,6 +224,13 @@ pub struct Selection {
     pub big_endian: bool,
     pub bit: Option<u8>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureField {
+    pub name: String,
+    pub selection: Selection,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     Unsigned(u64),

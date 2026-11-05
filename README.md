@@ -2,7 +2,7 @@
 
 Windows EtherNet/IP Class 1 scanner and CSV assembly logger.
 
-EIPMaster is the source repository for the Assembly Scanner desktop application. It opens one fixed-size cyclic IPv4 unicast connection, displays device identity and live assembly data, and records one decoded input value per accepted packet. Each device session owns its TCP and UDP sockets, producer, receiver, output buffer and counters. The CSV writer runs independently.
+EIPMaster is the source repository for the Assembly Scanner desktop application. It opens one fixed-size cyclic IPv4 unicast connection, displays device identity and live assembly data, and records decoded input values per accepted packet. Each device session owns its TCP and UDP sockets, producer, receiver, output buffer and counters. The CSV writer runs independently.
 
 ## Table of Contents
 
@@ -40,13 +40,23 @@ Launch the executable from the repository root so the sample paths resolve. For 
 3. For manual setup, choose **Manual settings** or load a TOML profile. Set the T→O input and O→T output or heartbeat connection points. Use payload sizes excluding transport headers, and confirm the sizes against the adapter. Enter each RPI in microseconds. Port zero requests an ephemeral local UDP port. Enter the selected NIC's fixed UDP port if the adapter requires it.
 4. Set the Run/Idle option for each direction. Standard Forward_Open allows up to 509 bytes of assembly payload and optional Run/Idle header per direction after the two-byte Class 1 sequence. Enter the optional configuration instance and its hex bytes when required. A configuration payload is applied in Forward_Open. Review the exact bytes before reconnecting to apply changes.
 5. Prefer a supported **Input-only heartbeat profile** for logging. An exclusive-owner connection can take control immediately and sends the staged bytes. An O→T Run/Idle header asserts Run from the first frame. Confirm ownership and the specific output or configuration bytes before checking the authorization box. On an authorized output connection, **Apply staged outputs** swaps the cyclic buffer.
-6. Choose the zero-based input byte offset, an optional LSB-first bit, or a numeric type and byte order. The typed view and CSV share the selection. The raw view uses zero-based offsets.
+6. Choose the zero-based input byte offset, an optional LSB-first bit, or a numeric type and byte order. The typed view and default CSV use the primary selection. A settings profile can define up to three named CSV fields. The raw view uses zero-based offsets.
 
 The initial protocol scope is standard Forward_Open, fixed-size cyclic Class 1 unicast and direct assembly paths. Routed paths, electronic keys, multicast, listen-only, and Large Forward_Open are outside that scope. Keep device-specific presets, vendor files and raw captures in the Git-ignored `.local/` folder. The tracked [sample EDS](samples/loopback.eds) and [sample TOML](samples/loopback.toml) target the localhost fixture.
 
 ### Capture and join CSV
 
-Start capture before or during a connection. Each accepted forward-sequence input packet contributes a sample even when its value repeats. The timestamp uses the monotonic clock immediately after receive. The CSV includes the UTC capture start, elapsed microseconds, sample index, connection generation and packet sequences.
+Start capture before or during a connection. Each accepted forward-sequence input packet contributes a sample even when its value repeats. The timestamp uses the monotonic clock immediately after receive. The CSV includes the UTC capture start, elapsed microseconds, sample index, connection generation and packet sequences. Existing profiles write the primary selection to the `value` column. Add one `[[capture_fields]]` table per field to replace `value` with named columns. This example records a status word from the first two input bytes. The GUI's primary readback remains controlled by `[selection]`.
+
+```toml
+[[capture_fields]]
+name = "status_word"
+
+[capture_fields.selection]
+offset = 0
+kind = "U16"
+big_endian = false
+```
 
 Set either rotation limit to zero to disable it. Each part has the same UTF-8 CSV header. Keep capture armed during a reconnect to retain the UTC origin and sample index. The generation column marks the new connection. Select **Stop capture and flush** to drain the queue.
 

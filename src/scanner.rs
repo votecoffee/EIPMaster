@@ -714,10 +714,8 @@ fn receive(
                             status.input.extend_from_slice(bytes);
                             status.input_run = run;
                             status.value = cfg.selection.decode(bytes);
-                            if let Some(value) = status.value {
-                                if let Some(sink) = &*slot.read().unwrap() {
-                                    sink.record(stamp, generation, seq, cip, value);
-                                }
+                            if let Some(sink) = &*slot.read().unwrap() {
+                                sink.record(stamp, generation, seq, cip, bytes);
                             }
                         }
                     }

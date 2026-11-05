@@ -226,15 +226,11 @@ impl App {
         }
     }
     fn start_capture(&mut self) {
-        let selection = self
+        let settings = self
             .active
             .as_ref()
             .filter(|_| self.connection.is_some())
             .unwrap_or(&self.settings);
-        if let Err(e) = selection.selection.validate(selection.input_size as usize) {
-            self.error = Some(e);
-            return;
-        }
         match Capture::start(
             &self.slot,
             capture::Options {
@@ -243,6 +239,7 @@ impl App {
                 rotate_bytes: self.rotate_bytes,
                 rotate_seconds: self.rotate_seconds,
             },
+            settings,
         ) {
             Ok(capture) => {
                 self.capture = Some(capture);
@@ -550,7 +547,7 @@ impl App {
             });
             ui.label("Configuration hex bytes (sent in Forward_Open)");
             ui.add(egui::TextEdit::multiline(&mut s.config_hex).desired_rows(1).desired_width(f32::INFINITY).code_editor());
-            title(ui, "02", "Value to capture");
+            title(ui, "02", if s.capture_fields.is_empty() { "Value to capture" } else { "Primary readback" });
             let selection = &mut s.selection;
             ui.horizontal_wrapped(|ui| {
                 ui.label("Byte offset");
@@ -566,6 +563,10 @@ impl App {
                 }
             });
             if let Err(e) = selection.validate(s.input_size as usize) { ui.colored_label(RED, e); }
+            if !s.capture_fields.is_empty() {
+                let names = s.capture_fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>();
+                ui.small(format!("CSV fields from settings: {}", names.join(", ")));
+            }
         });
         if online || self.capturing {
             ui.small("Setup and value selection are held while connected or capturing.");
@@ -653,9 +654,11 @@ impl App {
         self.selected = i;
         if let Some(i) = i {
             let selection = self.settings.selection;
+            let fields = self.settings.capture_fields.clone();
             let port = self.settings.local_udp_port;
             self.settings = self.profiles[i].settings.clone();
             self.settings.selection = selection;
+            self.settings.capture_fields = fields;
             self.settings.local_udp_port = port;
         }
     }

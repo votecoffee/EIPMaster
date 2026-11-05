@@ -174,6 +174,7 @@ fn capture(
             rotate_bytes: 0,
             rotate_seconds: 0,
         },
+        &settings,
     )
     .map_err(|e| e.to_string())?;
     let connection =

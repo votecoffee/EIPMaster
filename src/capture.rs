@@ -1,4 +1,4 @@
-use crate::model::Value;
+use crate::model::{CAPTURE_METADATA, CaptureField, MAX_CAPTURE_FIELDS, Settings, Value};
 use chrono::Utc;
 use crossbeam_queue::ArrayQueue;
 use std::{
@@ -16,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HEADER: &str = "capture_start_utc,elapsed_us,sample_index,connection_generation,packet_sequence,cip_sequence,value\r\n";
 #[derive(Clone, Copy)]
 struct Sample {
     elapsed: u64,
@@ -24,12 +23,14 @@ struct Sample {
     generation: u64,
     sequence: u32,
     cip_sequence: u16,
-    value: Value,
+    values: [Value; MAX_CAPTURE_FIELDS],
 }
 pub struct Sink {
     start: Instant,
     utc: String,
     queue: ArrayQueue<Sample>,
+    fields: Vec<CaptureField>,
+    header: String,
     stop: AtomicBool,
     failed: AtomicBool,
     pub seen: AtomicU64,
@@ -47,24 +48,33 @@ impl Sink {
         generation: u64,
         sequence: u32,
         cip_sequence: u16,
-        value: Value,
+        input: &[u8],
     ) {
         if stamp < self.start {
             return;
         }
         let index = self.seen.fetch_add(1, Relaxed);
-        if !self.failed.load(Relaxed)
-            && self
-                .queue
-                .push(Sample {
-                    elapsed: stamp.duration_since(self.start).as_micros() as u64,
-                    index,
-                    generation,
-                    sequence,
-                    cip_sequence,
-                    value,
-                })
-                .is_err()
+        if self.failed.load(Relaxed) {
+            return;
+        }
+        let mut values = [Value::Unsigned(0); MAX_CAPTURE_FIELDS];
+        for (dest, field) in values.iter_mut().zip(&self.fields) {
+            let Some(value) = field.selection.decode(input) else {
+                return;
+            };
+            *dest = value;
+        }
+        if self
+            .queue
+            .push(Sample {
+                elapsed: stamp.duration_since(self.start).as_micros() as u64,
+                index,
+                generation,
+                sequence,
+                cip_sequence,
+                values,
+            })
+            .is_err()
         {
             self.overrun.fetch_add(1, Relaxed);
         }
@@ -82,28 +92,44 @@ pub struct Options {
     pub rotate_seconds: u64,
 }
 impl Capture {
-    pub fn start(slot: &Slot, opts: Options) -> io::Result<Self> {
-        Self::start_inner(slot, opts, Duration::ZERO)
+    pub fn start(slot: &Slot, opts: Options, settings: &Settings) -> io::Result<Self> {
+        Self::start_inner(slot, opts, settings, Duration::ZERO)
     }
-    fn start_inner(slot: &Slot, opts: Options, delay: Duration) -> io::Result<Self> {
+    fn start_inner(
+        slot: &Slot,
+        opts: Options,
+        settings: &Settings,
+        delay: Duration,
+    ) -> io::Result<Self> {
         let mut current = slot.write().unwrap();
         if current.is_some() || !(1..=1_000_000).contains(&opts.capacity) {
             return Err(io::Error::other(
                 "Capture already running or capacity outside 1–1,000,000",
             ));
         }
+        let fields = settings
+            .csv_fields()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let mut header = CAPTURE_METADATA.join(",");
+        for field in &fields {
+            header.push(',');
+            header.push_str(&field.name);
+        }
+        header.push_str("\r\n");
         fs::create_dir_all(&opts.directory)?;
         let start = Instant::now();
         let now = Utc::now();
         let prefix = opts
             .directory
             .join(now.format("capture-%Y%m%dT%H%M%S%.9fZ").to_string());
-        let mut first = Part::new(&prefix, 1)?;
+        let mut first = Part::new(&prefix, 1, &header)?;
         first.file.flush()?;
         let sink = Arc::new(Sink {
             start,
             utc: now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
             queue: ArrayQueue::new(opts.capacity),
+            fields,
+            header,
             stop: false.into(),
             failed: false.into(),
             seen: 0.into(),
@@ -145,7 +171,7 @@ struct Part {
     first_us: Option<u64>,
 }
 impl Part {
-    fn new(prefix: &std::path::Path, index: u64) -> io::Result<Self> {
+    fn new(prefix: &std::path::Path, index: u64, header: &str) -> io::Result<Self> {
         let name = format!(
             "{}-{index:06}.csv",
             prefix.file_name().unwrap().to_string_lossy()
@@ -157,10 +183,10 @@ impl Part {
                 .write(true)
                 .open(prefix.with_file_name(name))?,
         );
-        file.write_all(HEADER.as_bytes())?;
+        file.write_all(header.as_bytes())?;
         Ok(Self {
             file,
-            bytes: HEADER.len() as u64,
+            bytes: header.len() as u64,
             samples: 0,
             first_us: None,
         })
@@ -182,15 +208,18 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
             line.clear();
             write!(
                 line,
-                "{},{},{},{},{},{},{}\r\n",
+                "{},{},{},{},{},{}",
                 sink.utc,
                 sample.elapsed,
                 sample.index,
                 sample.generation,
                 sample.sequence,
                 sample.cip_sequence,
-                sample.value
             )?;
+            for value in &sample.values[..sink.fields.len()] {
+                write!(line, ",{value}")?;
+            }
+            line.extend_from_slice(b"\r\n");
             if part.samples > 0
                 && ((opts.rotate_bytes != 0 && part.bytes + line.len() as u64 > opts.rotate_bytes)
                     || (opts.rotate_seconds != 0
@@ -201,7 +230,7 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                 committed += part.samples;
                 sink.written.store(committed, Relaxed);
                 number += 1;
-                part = Part::new(&sink.prefix, number)?;
+                part = Part::new(&sink.prefix, number, &sink.header)?;
             }
             part.file.write_all(&line)?;
             part.first_us.get_or_insert(sample.elapsed);
@@ -230,6 +259,22 @@ mod tests {
             Utc::now().timestamp_nanos_opt().unwrap()
         ));
         let slot = Slot::default();
+        let mut settings = Settings {
+            input_size: 6,
+            ..Settings::default()
+        };
+        settings.capture_fields = [("first", 0), ("second", 2), ("third", 4)]
+            .into_iter()
+            .map(|(name, offset)| CaptureField {
+                name: name.into(),
+                selection: crate::model::Selection {
+                    offset,
+                    kind: crate::model::Kind::I16,
+                    big_endian: true,
+                    bit: None,
+                },
+            })
+            .collect();
         let mut capture = Capture::start_inner(
             &slot,
             Options {
@@ -238,6 +283,7 @@ mod tests {
                 rotate_bytes: 150,
                 rotate_seconds: 0,
             },
+            &settings,
             Duration::from_millis(150),
         )
         .unwrap();
@@ -247,7 +293,7 @@ mod tests {
                 if n < 4 { 1 } else { 2 },
                 n,
                 n as u16,
-                Value::Unsigned(5),
+                &[0xff, 0xfb, 0, 7, 0x01, 0x05],
             );
         }
         capture.stop(&slot);
@@ -261,9 +307,9 @@ mod tests {
         assert_eq!(parts.len(), 8);
         for (index, path) in parts.iter().enumerate() {
             let content = fs::read_to_string(path).unwrap();
-            assert!(content.starts_with(HEADER));
+            assert!(content.starts_with("capture_start_utc,elapsed_us,sample_index,connection_generation,packet_sequence,cip_sequence,first,second,third\r\n"));
             assert!(content.ends_with(&format!(
-                ",{index},{},{index},{index},5\r\n",
+                ",{index},{},{index},{index},-5,7,261\r\n",
                 if index < 4 { 1 } else { 2 }
             )));
         }
@@ -288,6 +334,7 @@ mod tests {
                 rotate_bytes: 0,
                 rotate_seconds: 1,
             },
+            &Settings::default(),
         )
         .unwrap();
         let prefix = capture.sink.prefix.file_name().unwrap().to_str().unwrap();
@@ -300,7 +347,7 @@ mod tests {
                 1,
                 n,
                 n as u16,
-                Value::Unsigned(5),
+                &5u32.to_le_bytes(),
             );
         }
         capture.stop(&slot);

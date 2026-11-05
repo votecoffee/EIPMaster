@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tomllib
 
-from join_capture import parts_for, rows
+from join_capture import METADATA, parts_for, read_header, rows
 
 FIXTURE = Path(__file__).with_name("loopback_adapter.py")
 PROFILE = FIXTURE.parent.parent / "samples" / "loopback.toml"
@@ -57,7 +57,9 @@ def main():
     report = tomllib.loads(success.stdout)
     assert report == tomllib.loads((root / "capture/capture.toml").read_text(encoding="utf-8"))
     assert adapter["forward_close"] and adapter["ot_invalid"] == 0
-    samples = list(rows(parts_for(Path(report["csv_prefix"]))))
+    legacy_parts = parts_for(Path(report["csv_prefix"]))
+    assert read_header(legacy_parts[0]) == METADATA + ["value"]
+    samples = list(rows(legacy_parts))
     assert len(samples) == report["written"] == report["accepted"] > 100
     assert [int(row[2]) for row in samples] == list(range(len(samples)))
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
@@ -65,13 +67,46 @@ def main():
     assert report["duration_reached"] and report["buffer_overruns"] == 0
     assert report["actual_ot_us"] == report["actual_to_us"] == 1000
 
+    profile = root / "three-fields.toml"
+    fields = [
+        ("whole", 0, "U32", False),
+        ("first_word", 0, "U16", True),
+        ("high_byte", 3, "U8", False),
+    ]
+    text = PROFILE.read_text(encoding="utf-8")
+    for name, offset, kind, big_endian in fields:
+        text += (f'\n[[capture_fields]]\nname = "{name}"\n[capture_fields.selection]\n'
+                 f'offset = {offset}\nkind = "{kind}"\nbig_endian = {str(big_endian).lower()}\n')
+    profile.write_text(text, encoding="utf-8")
+    multi, adapter = with_adapter(
+        root, "three-fields", [exe, "capture", profile, root / "three-fields", "1", "0:12:1"]
+    )
+    assert multi.returncode == 0, (multi.stdout, multi.stderr)
+    multi_report = tomllib.loads(multi.stdout)
+    parts = parts_for(Path(multi_report["csv_prefix"]))
+    header = read_header(parts[0])
+    assert header == METADATA + [name for name, *_ in fields]
+    multi_samples = list(rows(parts))
+    assert len(multi_samples) == multi_report["written"] > 100 and adapter["forward_close"]
+    for row in multi_samples:
+        expected = int(row[4]) // 16
+        payload = expected.to_bytes(4, "little")
+        assert list(map(int, row[6:])) == [expected, int.from_bytes(payload[:2], "big"), payload[3]]
+
+    invalid = root / "invalid-fields.toml"
+    invalid.write_text(text.replace('name = "high_byte"', 'name = "packet_sequence"'), encoding="utf-8")
+    bad = subprocess.run([exe, "capture", invalid, root / "invalid", "1", "0:12:1"],
+                         capture_output=True, text=True, timeout=5)
+    assert bad.returncode == 1 and "Duplicate capture field name" in bad.stderr
+    assert not (root / "invalid").exists()
+
     unsafe = root / "output-owner.toml"
     unsafe.write_text(PROFILE.read_text(encoding="utf-8").replace("input_only = true", "input_only = false"), encoding="utf-8")
     reject = subprocess.run([exe, "capture", unsafe, root / "unsafe", "1", "0:12:1"],
                             capture_output=True, text=True, timeout=5)
     assert reject.returncode == 1 and "input-only" in reject.stderr
     assert not (root / "unsafe").exists()
-    print(f"CLI verified: identity, identity mismatch before Forward_Open, {len(samples)} CSV rows, output ownership rejected.")
+    print(f"CLI verified: identity, mismatch rejected, {len(samples)} legacy rows, {len(multi_samples)} multi-field rows, unsafe profile rejected.")
 
 
 if __name__ == "__main__":

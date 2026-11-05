@@ -3,22 +3,34 @@ import argparse
 import csv
 from pathlib import Path
 
-HEADER = [
+METADATA = [
     "capture_start_utc", "elapsed_us", "sample_index", "connection_generation",
-    "packet_sequence", "cip_sequence", "value",
+    "packet_sequence", "cip_sequence",
 ]
 
 
-def rows(parts):
+def read_header(part):
+    with part.open(encoding="utf-8", newline="") as file:
+        header = next(csv.reader(file, strict=True), [])
+    if (header[:len(METADATA)] != METADATA or len(header) <= len(METADATA)
+            or any(not name for name in header)
+            or len(set(name.lower() for name in header)) != len(header)):
+        raise ValueError(f"Unexpected header in {part}")
+    return header
+
+
+def rows(parts, header=None):
+    if header is None:
+        header = read_header(parts[0])
     start = None
     last_index = last_us = last_generation = -1
     for part in parts:
         with part.open(encoding="utf-8", newline="") as file:
             reader = csv.reader(file, strict=True)
-            if next(reader, None) != HEADER:
+            if next(reader, None) != header:
                 raise ValueError(f"Unexpected header in {part}")
             for row in reader:
-                if len(row) != len(HEADER):
+                if len(row) != len(header):
                     raise ValueError(f"Unexpected field count in {part}:{reader.line_num}")
                 if start is None:
                     start = row[0]
@@ -46,13 +58,14 @@ def main():
     parser.add_argument("output", type=Path, help="New joined CSV path")
     args = parser.parse_args()
     parts = parts_for(args.capture_prefix)
+    header = read_header(parts[0])
     output_created = False
     try:
         with args.output.open("x", encoding="utf-8", newline="") as output:
             output_created = True
             writer = csv.writer(output, lineterminator="\r\n")
-            writer.writerow(HEADER)
-            writer.writerows(rows(parts))
+            writer.writerow(header)
+            writer.writerows(rows(parts, header))
     except (OSError, ValueError, csv.Error):
         if output_created:
             args.output.unlink(missing_ok=True)
