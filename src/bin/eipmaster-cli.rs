@@ -131,6 +131,7 @@ struct Report {
     written: u64,
     buffer_overruns: u64,
     last_value: Option<String>,
+    last_input_hex: Option<String>,
     csv_prefix: String,
     identity_error: Option<String>,
     cip_error: Option<String>,
@@ -239,6 +240,8 @@ fn capture(
         written: sink.written.load(Relaxed),
         buffer_overruns: sink.overrun.load(Relaxed),
         last_value: status.value.map(|v| v.to_string()),
+        last_input_hex: (!status.input.is_empty())
+            .then(|| assembly_scanner::model::hex(&status.input)),
         csv_prefix: sink.prefix.display().to_string(),
         identity_error: status.identity_error,
         cip_error: status.cip_error,

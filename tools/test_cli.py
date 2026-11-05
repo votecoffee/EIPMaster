@@ -50,6 +50,7 @@ def main():
     assert mismatch.returncode == 1
     assert "Identity mismatch" in tomllib.loads(mismatch.stdout)["identity_error"]
     assert "ot_requested_us" not in adapter
+    assert "last_input_hex" not in tomllib.loads(mismatch.stdout)
 
     success, adapter = with_adapter(root, "capture", [*capture, root / "capture", "2", "0:12:1"])
     assert success.returncode == 0, (success.stdout, success.stderr)
@@ -60,6 +61,7 @@ def main():
     assert len(samples) == report["written"] == report["accepted"] > 100
     assert [int(row[2]) for row in samples] == list(range(len(samples)))
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
+    assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
     assert report["actual_ot_us"] == report["actual_to_us"] == 1000
 
