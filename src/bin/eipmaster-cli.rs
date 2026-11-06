@@ -22,6 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "eipmaster-cli/interrupt.rs"]
+mod interrupt;
 #[path = "eipmaster-cli/qualification.rs"]
 mod qualification;
 
@@ -37,16 +39,30 @@ Capture requires an input-only profile. The scheduler defaults to deadline. [app
 The expected Identity Object values are decimal and checked before Forward_Open.
 Capture seconds must be an integer from 1 to 3600.
 Qualification runs 15 seconds at 8 ms and three 60-second trials at 1 ms.
-Only loopback qualification accepts a duration override from 1 to 60 seconds.";
+Only loopback qualification accepts a duration override from 1 to 60 seconds.
+On Windows, Ctrl+C or Ctrl+Break stops capture and flushes the CSV.";
 
 fn main() -> ExitCode {
-    match run(&env::args_os().skip(1).collect::<Vec<_>>()) {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "capture" || arg == "qualify")
+        && let Err(error) = interrupt::install()
+    {
+        eprintln!("Console stop handler unavailable: {error}");
+    }
+    let code = match run(&args) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    };
+    if interrupt::requested() {
+        ExitCode::from(130)
+    } else {
+        code
     }
 }
 
@@ -227,6 +243,8 @@ struct Report {
     input_size: u16,
     duration_seconds: u64,
     duration_reached: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    interrupted: bool,
     schedule: Schedule,
     requested_ot_us: u32,
     requested_to_us: u32,
@@ -268,6 +286,7 @@ impl Report {
             .map_or(self.accepted, |attempt| attempt.accepted);
         self.state == "Closed"
             && self.duration_reached
+            && !self.interrupted
             && final_accepted != 0
             && self.written != 0
             && self.written + self.unchanged == self.accepted
@@ -389,7 +408,7 @@ fn capture(
     });
     let mut deadline = None;
     let mut duration_reached = false;
-    'capture: loop {
+    'capture: while !interrupt::requested() {
         let connection = match pin {
             Some(pin) => Connection::start_pinned_input(
                 settings.clone(),
@@ -424,6 +443,10 @@ fn capture(
             }
         };
         while !connection.finished() {
+            if interrupt::requested() || capture.finished() {
+                connection.stop();
+                break;
+            }
             let now = Instant::now();
             if deadline.is_none()
                 && let Some(age) = connection.input_age()
@@ -432,10 +455,6 @@ fn capture(
             }
             if deadline.is_some_and(|end| now >= end) {
                 duration_reached = true;
-                connection.stop();
-                break;
-            }
-            if capture.finished() {
                 connection.stop();
                 break;
             }
@@ -455,7 +474,7 @@ fn capture(
         }
         let retryable = attempt.status.retryable;
         attempts.push(attempt);
-        if duration_reached || capture.finished() || !retryable {
+        if duration_reached || interrupt::requested() || capture.finished() || !retryable {
             break;
         }
         let Some(reconnect) = reconnect.as_mut() else {
@@ -465,12 +484,12 @@ fn capture(
             break;
         }
         loop {
+            if interrupt::requested() || capture.finished() {
+                break 'capture;
+            }
             let now = Instant::now();
             if deadline.is_some_and(|end| now >= end) {
                 duration_reached = true;
-                break 'capture;
-            }
-            if capture.finished() {
                 break 'capture;
             }
             if let Some(next) = reconnect.take_ready(now) {
@@ -481,8 +500,12 @@ fn capture(
         }
     }
     capture.stop(&slot);
-    let last = attempts.last().unwrap();
-    let status = &last.status;
+    let last = attempts.last();
+    let canceled = Status {
+        state: "Canceled",
+        ..Status::default()
+    };
+    let status = last.map_or(&canceled, |run| &run.status);
     let last_input = attempts
         .iter()
         .rev()
@@ -498,6 +521,7 @@ fn capture(
         input_size: settings.input_size,
         duration_seconds: seconds,
         duration_reached,
+        interrupted: interrupt::requested(),
         schedule: preferences.schedule,
         requested_ot_us: settings.output_rpi_us,
         requested_to_us: settings.input_rpi_us,
@@ -527,8 +551,8 @@ fn capture(
         disk_error: sink.error.lock().unwrap().clone(),
         identity: status.identity.clone(),
         receive_spacing: status.spacing,
-        send_spacing: last.send_spacing,
-        send_timing: last.send_timing,
+        send_spacing: last.map_or_else(Spacing::default, |run| run.send_spacing),
+        send_timing: last.map_or_else(SendTiming::default, |run| run.send_timing),
         attempts: if preferences.auto_reconnect {
             attempts
                 .iter()

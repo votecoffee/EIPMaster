@@ -200,6 +200,22 @@ A separate 60-second run used above-normal priority on the primary and normal pr
 
 The fixture producers missed 384 and 383 slots, respectively. The primary's worst dispatch lateness was 2,817 µs and its longest UDP send call was 579 µs. The peer recorded 4,612 µs and 2,712 µs, with six send calls lasting at least one RPI. These are headless localhost measurements.
 
+## Graceful console stops
+
+The CLI integration test sent real Windows console events inside an isolated windowless console. The adapter fixture confirmed Forward_Close in every case.
+
+| Event and state | Preserved CSV rows | Result |
+|---|---:|---|
+| Ctrl+Break after capture rotated | 131 across two parts | Exit 130 and interrupted capture report |
+| Ctrl+C during the qualification baseline | 5 | Exit 130 and interrupted qualification receipt with no later trials |
+| Ctrl+C during the automatic reconnect delay | 75 | Exit 130 and no new connection attempt |
+
+All accepted rows reached disk with contiguous sample indexes and zero buffer overruns. The windowless test harness requires Windows 11 build 26100 or later. It verifies the process list before sending either event. [Windows console control events](https://learn.microsoft.com/windows/console/ctrl-c-and-ctrl-break-signals)
+
+```powershell
+python tools/test_interrupt.py .\target\release\eipmaster-cli.exe .\.local\interrupt-check
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

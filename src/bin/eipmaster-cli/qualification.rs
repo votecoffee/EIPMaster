@@ -1,4 +1,4 @@
-use super::{ExpectedIdentity, Report, capture, load_capture_profile, report_text};
+use super::{ExpectedIdentity, Report, capture, interrupt, load_capture_profile, report_text};
 use assembly_scanner::{model::CaptureMode, settings_file};
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -58,7 +58,9 @@ fn intervals_match(report: &Report, requested_us: u32) -> bool {
 
 fn trial_errors(report: &Report, requested_us: u32) -> Vec<String> {
     let mut errors = Vec::new();
-    if !report.completed() {
+    if report.interrupted {
+        errors.push("Capture interrupted by console signal".into());
+    } else if !report.completed() {
         errors.push("Capture did not complete cleanly".into());
     }
     if !intervals_match(report, requested_us) {
@@ -164,6 +166,9 @@ pub(super) fn run(
     };
 
     for (index, name) in RUNS.into_iter().enumerate() {
+        if interrupt::requested() {
+            break;
+        }
         let (settings, seconds) = if index == 0 {
             (&baseline, baseline_seconds)
         } else {
@@ -185,7 +190,8 @@ pub(super) fn run(
         ) {
             Ok(report) => {
                 trial.errors = trial_errors(&report, settings.input_rpi_us);
-                let stop = report.identity_error.is_some()
+                let stop = report.interrupted
+                    || report.identity_error.is_some()
                     || report.disk_error.is_some()
                     || (index == 0
                         && !(report.completed() && intervals_match(&report, BASELINE_US)));
@@ -207,7 +213,13 @@ pub(super) fn run(
 
     let passed =
         summary.runs.len() == RUNS.len() && summary.runs.iter().all(|run| run.errors.is_empty());
-    summary.outcome = if passed { "passed" } else { "failed" };
+    summary.outcome = if interrupt::requested() {
+        "interrupted"
+    } else if passed {
+        "passed"
+    } else {
+        "failed"
+    };
     summary.finished_utc = Some(now_utc());
     println!("{}", save_summary(&summary, &receipt)?);
     Ok(passed)
