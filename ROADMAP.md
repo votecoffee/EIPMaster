@@ -1,6 +1,6 @@
 # EIPMaster roadmap
 
-EIPMaster is a standalone Windows x64 EtherNet/IP scanner. The current build handles one fixed-size cyclic Class 1 unicast connection. It supports EDS and manual setup, saved profiles, typed assembly mappings, authorized output staging, a GUI and CLI, and selective CSV logging with rotation and loss accounting.
+EIPMaster is a standalone Windows x64 EtherNet/IP scanner. The current GUI can run multiple fixed-size cyclic Class 1 unicast connections with a separate setup and capture per device. It supports EDS and manual setup, saved profiles, typed assembly mappings, authorized output staging, a GUI and CLI, and selective CSV logging with rotation and loss accounting.
 
 Simulator checks cover that workflow. Physical acceptance of sustained 1 ms capture in EIPMaster remains open. Treat the requested RPI, the intervals returned by Forward_Open, and the measured send and receive spacing as separate results.
 
@@ -15,8 +15,8 @@ The offline timing and profile work can proceed while the bench device is unavai
 
 ## 0.3 Multiple adapters
 
-- [Run two isolated scanner sessions](https://github.com/votecoffee/EIPMaster/issues/5). Keep connection settings, sockets, identity, staged outputs, and write authorization separate. Prove that a simulated fault on one device leaves the other session running.
-- [Capture and recover streams independently](https://github.com/votecoffee/EIPMaster/issues/6). Give each device its own bounded CSV queue, rotation, loss counters, and reconnect generations. Scope automatic reconnect to verified input-only sessions.
+- [Run two isolated scanner sessions](https://github.com/votecoffee/EIPMaster/issues/5). The GUI keeps each adapter's setup, sockets, identity, staged outputs, and write authorization separate. The [dual-adapter loopback check](VERIFICATION.md#concurrent-adapter-sessions) exercises a receive timeout while the other session continues.
+- [Capture and recover streams independently](https://github.com/votecoffee/EIPMaster/issues/6). Each device has its own bounded CSV queue, rotation, loss counters, and reconnect generations. Verify writer failure isolation under concurrent capture and scope automatic reconnect to verified input-only sessions.
 
 The milestone requires concurrent loopback coverage and compatibility with existing single-device profiles. [Multiple-adapter milestone](https://github.com/votecoffee/EIPMaster/milestone/2)
 

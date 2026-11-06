@@ -6,7 +6,7 @@ Extract the entire ZIP into a new folder and open PowerShell there. Run the GUI 
 .\assembly-scanner.exe
 ```
 
-The GUI starts offline. It uses an OpenGL-capable graphics driver and remembers the last setup in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. Python 3.11 or newer is needed only for the optional simulator and CSV utilities.
+The GUI starts offline. It uses an OpenGL-capable graphics driver and remembers the device list and setups in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. Python 3.11 or newer is needed only for the optional simulator and CSV utilities.
 
 ## Check the bundle on localhost
 
@@ -29,7 +29,7 @@ The simulator check uses a new output directory and an 8 ms RPI. It exercises in
 python tools/join_capture.py 'captures/capture-<UTC-prefix>' joined.csv
 ```
 
-Use the capture prefix shown by the GUI. [Verification notes](VERIFICATION.md) describe the timing measurements and [physical acceptance](https://github.com/votecoffee/EIPMaster/issues/2).
+Use the capture prefix shown by the GUI. Select **Add device** to set up another adapter and switch between sessions using the **Devices** list. [Verification notes](VERIFICATION.md) describe the timing measurements and [physical acceptance](https://github.com/votecoffee/EIPMaster/issues/2).
 
 ## Verify the download
 

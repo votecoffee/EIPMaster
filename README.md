@@ -2,7 +2,7 @@
 
 Windows EtherNet/IP Class 1 scanner and CSV assembly logger.
 
-EIPMaster is the source repository for the Assembly Scanner desktop application. It opens one fixed-size cyclic IPv4 unicast connection, displays device identity and live assembly data, stages typed output values, and records selected inputs to CSV. Each device session owns its TCP and UDP sockets, producer, receiver, output buffer and counters. The CSV writer runs independently.
+EIPMaster is the source repository for the Assembly Scanner desktop application. It opens fixed-size cyclic IPv4 unicast connections, displays device identity and live assembly data, stages typed output values, and records selected inputs to CSV. The GUI can run separate sessions for multiple adapters in one window. Each device session owns its TCP and UDP sockets, producer, receiver, output buffer and counters. The CSV writer runs independently.
 
 ## Table of Contents
 
@@ -49,9 +49,15 @@ Launch the executable from the repository root so the sample paths resolve. For 
 
 ### Save and restore settings
 
-The Windows GUI automatically remembers the last setup in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. It saves edited settings while the window is open and on a normal close. The session includes device and NIC settings, imported EDS profiles and overrides, assembly mappings, staged bytes, and CSV and scheduler preferences. The app starts offline. Confirm the bench and any output or configuration writes again before connecting.
+The Windows GUI automatically remembers the device list and selected device in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. It saves edited settings while the window is open and on a normal close. Each setup includes device and NIC settings, imported EDS profiles and overrides, assembly mappings, staged bytes, and CSV and scheduler preferences. An older single-device session opens as **Device 1**. The app starts offline. Confirm the bench and any output or configuration writes again for each device before connecting.
 
 To keep a named setup, enter a TOML path in **Settings TOML** and select **Save**. Enter a new path to save a separate profile, or select **Replace profile** to update an existing file. Select **Load** to switch to a saved profile while disconnected and with capture stopped. Older profiles still load. The optional `[app]` table stores the capture directory, buffer capacity, rotation limits and scheduler.
+
+### Work with multiple adapters
+
+Choose **Add device**, give the setup a name, then enter its settings or load a named TOML profile. Use the **Devices** list to switch between setups while other connections and captures keep running. Each setup has its own identity, connection state, counters, staged bytes, write confirmation, and capture controls. Stop capture and disconnect the selected device before removing its setup.
+
+Use local UDP port 0 when the adapter supports an automatically assigned port. Two simultaneous connections cannot reserve the same fixed local IPv4 address and UDP port. If both adapters require the same fixed port, assign each connection a distinct supported local IPv4 bind address. A fixed port already in use outside EIPMaster can also cause a bind error.
 
 ### Connect to a bench adapter
 
@@ -133,7 +139,7 @@ To exercise a custom profile against a localhost fixture, pass its TOML file as 
 ## Verification
 
 Run the Rust tests and the loopback harness on Windows. The [verification notes](VERIFICATION.md) describe the upstream crate review, simulator timing and physical acceptance procedure.
-The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exercise the same cases at 1 ms.
+The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exercise the same cases at 1 ms. The GUI harness accepts `--dual-only` to run two independent loopback adapters and stall one while the other continues recording.
 
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --locked --release

@@ -62,6 +62,23 @@ All runs closed cleanly. The median per-run scanner send p99 changed from 1,535 
 
 Historical simulator reports were bundled with the original development packages. The portable preview includes this summary and its build manifest. Device-specific captures stay outside the package.
 
+## Concurrent adapter sessions
+
+The Windows GUI ran two independent localhost fixtures in a single process. The adapters used distinct serial numbers, UDP endpoints, and input values. The healthy adapter requested 8,000 µs in both directions and the stalled adapter requested 16,000 µs. Each fixture returned the same intervals in Forward_Open.
+
+| Stream | End state | CSV rows / parts | T→O sequence gaps | CSV overruns |
+|---|---|---:|---:|---:|
+| Healthy | Closed | 1,476 / 4 | 1 | 0 |
+| Stalled | Timed out | 75 / 1 | 0 | 0 |
+
+A repeat wrote 1,483 healthy and 75 stalled rows with zero sequence gaps or overruns on either stream.
+
+Both fixtures received Forward_Close. Each stream had contiguous CSV sample indexes and every accepted sample was written to the correct stream. The captures overlapped and the healthy stream recorded for more than five seconds after the stalled stream's last sample. The receive timeout was counted only on the stalled adapter. These results cover simulated input-only sessions.
+
+```powershell
+python tools/benchmark.py .\target\release\assembly-scanner.exe .\.local\dual-adapter-check --dual-only
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

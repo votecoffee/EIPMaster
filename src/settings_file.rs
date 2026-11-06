@@ -80,7 +80,21 @@ pub struct Session {
     pub selected_eds: Option<usize>,
 }
 
-impl Session {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedDevice {
+    pub name: String,
+    pub setup: Session,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspace {
+    pub selected_device: usize,
+    pub devices: Vec<NamedDevice>,
+}
+
+impl Workspace {
     pub fn path() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
@@ -97,14 +111,34 @@ impl Session {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let session: Self = toml::from_str(&text).map_err(io::Error::other)?;
-        if session
-            .selected_eds
-            .is_some_and(|index| index >= session.eds_profiles.len())
-        {
-            return Err(io::Error::other("Invalid saved EDS selection"));
+        let table: toml::Table = toml::from_str(&text).map_err(io::Error::other)?;
+        let workspace: Self = if table.contains_key("devices") {
+            table.try_into().map_err(io::Error::other)?
+        } else {
+            Self {
+                selected_device: 0,
+                devices: vec![NamedDevice {
+                    name: "Device 1".into(),
+                    setup: table.try_into().map_err(io::Error::other)?,
+                }],
+            }
+        };
+        if workspace.selected_device >= workspace.devices.len() {
+            return Err(io::Error::other("Invalid saved device selection"));
         }
-        Ok(Some(session))
+        for device in &workspace.devices {
+            if device
+                .setup
+                .selected_eds
+                .is_some_and(|index| index >= device.setup.eds_profiles.len())
+            {
+                return Err(io::Error::other(format!(
+                    "Invalid saved EDS selection for {}",
+                    device.name
+                )));
+            }
+        }
+        Ok(Some(workspace))
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {

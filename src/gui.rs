@@ -4,7 +4,7 @@ use crate::{
     model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
     preflight,
     scanner::{self, Connection, Identity, Schedule, Spacing, Status},
-    settings_file::{self, Preferences, Session},
+    settings_file::{self, NamedDevice, Preferences, Session, Workspace},
 };
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::{
@@ -22,13 +22,32 @@ const RED: Color32 = Color32::from_rgb(255, 119, 119);
 
 pub fn run() -> eframe::Result {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let bench = if matches!(args.len(), 3 | 4) && args[0] == "--loopback-benchmark" {
+    let benchmarks = if args.len() == 3 && args[0] == "--loopback-benchmark" && args[1] == "dual" {
+        let root = PathBuf::from(&args[2]);
+        [
+            ("healthy", Ipv4Addr::LOCALHOST, 8_000),
+            ("stalled", Ipv4Addr::new(127, 0, 0, 2), 16_000),
+        ]
+        .into_iter()
+        .map(|(name, address, rpi)| Benchmark {
+            schedule: Schedule::Deadline,
+            directory: root.join(name),
+            started: Instant::now(),
+            stopping: false,
+            owner: false,
+            profile: None,
+            reconnect: false,
+            transitioned: false,
+            target: Some((address, rpi)),
+        })
+        .collect()
+    } else if matches!(args.len(), 3 | 4) && args[0] == "--loopback-benchmark" {
         let schedule = if args[1] == "tokio" {
             Schedule::Tokio
         } else {
             Schedule::Deadline
         };
-        Some(Benchmark {
+        vec![Benchmark {
             schedule,
             directory: PathBuf::from(&args[2]),
             started: Instant::now(),
@@ -37,9 +56,10 @@ pub fn run() -> eframe::Result {
             profile: args.get(3).map(PathBuf::from),
             reconnect: args[1] == "reconnect",
             transitioned: false,
-        })
+            target: None,
+        }]
     } else {
-        None
+        Vec::new()
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -62,7 +82,7 @@ pub fn run() -> eframe::Result {
             style.visuals.selection.bg_fill = Color32::from_rgb(22, 83, 87);
             style.spacing.item_spacing = egui::vec2(9.0, 7.0);
             cc.egui_ctx.set_style_of(egui::Theme::Dark, style);
-            Ok(Box::new(App::new(bench, Session::path())))
+            Ok(Box::new(App::new(benchmarks, Workspace::path())))
         }),
     )
 }
@@ -76,23 +96,25 @@ struct Benchmark {
     profile: Option<PathBuf>,
     reconnect: bool,
     transitioned: bool,
+    target: Option<(Ipv4Addr, u32)>,
 }
 
 struct RememberedSession {
     path: PathBuf,
-    saved: Session,
+    saved: Workspace,
     check_at: Instant,
     error: Option<String>,
 }
 
-struct App {
+struct Device {
+    id: u64,
+    name: String,
     settings: Settings,
     device: String,
     local: String,
     eds_path: String,
     toml_path: String,
     replace_profile: Option<PathBuf>,
-    session: Option<RememberedSession>,
     profiles: Vec<Profile>,
     selected: Option<usize>,
     bench_confirmed: bool,
@@ -114,16 +136,17 @@ struct App {
     identity_task: Option<mpsc::Receiver<Result<Identity, String>>>,
     bench: Option<Benchmark>,
 }
-impl App {
-    fn new(bench: Option<Benchmark>, session_path: Option<PathBuf>) -> Self {
-        let mut app = Self {
+impl Device {
+    fn new(id: u64, bench: Option<Benchmark>) -> Self {
+        let mut device = Self {
+            id,
+            name: format!("Device {id}"),
             settings: Settings::default(),
             device: "127.0.0.1".into(),
             local: "127.0.0.1".into(),
             eds_path: "samples/loopback.eds".into(),
             toml_path: String::new(),
             replace_profile: None,
-            session: None,
             profiles: vec![],
             selected: None,
             bench_confirmed: false,
@@ -145,27 +168,32 @@ impl App {
             identity_task: None,
             bench,
         };
-        if let Some(bench) = &app.bench {
-            app.preferences.directory = bench.directory.to_string_lossy().into_owned();
-            app.preferences.schedule = bench.schedule;
-            app.preferences.rotate_seconds = 3;
+        if let Some(bench) = &device.bench {
+            device.preferences.directory = bench.directory.to_string_lossy().into_owned();
+            device.preferences.schedule = bench.schedule;
+            device.preferences.rotate_seconds = 3;
             if let Some(profile) = &bench.profile {
                 match settings_file::load_profile(profile) {
-                    Ok((settings, _)) => app.settings = settings,
+                    Ok((settings, _)) => device.settings = settings,
                     Err(error) => {
-                        app.error = Some(format!("Could not load loopback settings: {error}"));
-                        return app;
+                        device.error = Some(format!("Could not load loopback settings: {error}"));
+                        return device;
                     }
                 }
             }
+            if let Some((target, rpi)) = bench.target {
+                device.device = target.to_string();
+                device.settings.input_rpi_us = rpi;
+                device.settings.output_rpi_us = rpi;
+            }
             if bench.owner {
-                app.settings.input_only = false;
-                app.settings.output_instance = 100;
-                app.settings.output_size = 2;
-                app.settings.output_run_idle = true;
-                app.settings.input_run_idle = true;
-                app.settings.output_hex = "00 00".into();
-                app.settings.output_fields = vec![CaptureField {
+                device.settings.input_only = false;
+                device.settings.output_instance = 100;
+                device.settings.output_size = 2;
+                device.settings.output_run_idle = true;
+                device.settings.input_run_idle = true;
+                device.settings.output_hex = "00 00".into();
+                device.settings.output_fields = vec![CaptureField {
                     name: "test_word".into(),
                     selection: Selection {
                         kind: Kind::U16,
@@ -173,76 +201,64 @@ impl App {
                         ..Selection::default()
                     },
                 }];
-                app.settings
+                device
+                    .settings
                     .stage_output(0, "4660")
                     .expect("fixture output mapping");
-                app.settings.config_size = 3;
-                app.settings.config_hex = "AA BB CC".into();
-                app.writes_confirmed = true;
+                device.settings.config_size = 3;
+                device.settings.config_hex = "AA BB CC".into();
+                device.writes_confirmed = true;
             }
-            app.start_capture();
-            app.connect();
-        } else if let Some(path) = session_path {
-            let error = match Session::load(&path) {
-                Ok(Some(saved)) => {
-                    app.settings = saved.settings;
-                    app.preferences = saved.preferences;
-                    app.device = saved.device;
-                    app.local = saved.local;
-                    app.eds_path = saved.eds_path;
-                    app.toml_path = saved.profile_path;
-                    app.profiles = saved.eds_profiles;
-                    app.selected = saved.selected_eds;
-                    None
-                }
-                Ok(None) => None,
-                Err(error) => Some(format!("Could not restore last session — {error}")),
-            };
-            app.session = Some(RememberedSession {
-                path,
-                saved: app.session_snapshot(),
-                check_at: Instant::now(),
-                error,
-            });
+            device.start_capture();
+            device.connect(&[]);
+        }
+        device
+    }
+
+    fn restore(id: u64, saved: NamedDevice) -> Self {
+        let mut device = Self::new(id, None);
+        device.name = saved.name;
+        let saved = saved.setup;
+        device.settings = saved.settings;
+        device.preferences = saved.preferences;
+        device.device = saved.device;
+        device.local = saved.local;
+        device.eds_path = saved.eds_path;
+        device.toml_path = saved.profile_path;
+        device.profiles = saved.eds_profiles;
+        device.selected = saved.selected_eds;
+        device
+    }
+
+    fn snapshot(&self) -> NamedDevice {
+        NamedDevice {
+            name: self.name.clone(),
+            setup: Session {
+                settings: self.settings.clone(),
+                preferences: self.preferences.clone(),
+                device: self.device.clone(),
+                local: self.local.clone(),
+                eds_path: self.eds_path.clone(),
+                profile_path: self.toml_path.clone(),
+                eds_profiles: self.profiles.clone(),
+                selected_eds: self.selected,
+            },
+        }
+    }
+
+    fn state_label(&self) -> &str {
+        if self.status.state.is_empty() {
+            "Offline"
         } else {
-            app.error = Some(
-                "LOCALAPPDATA is unavailable. Use a named TOML profile to save settings.".into(),
-            );
-        }
-        app
-    }
-
-    fn session_snapshot(&self) -> Session {
-        Session {
-            settings: self.settings.clone(),
-            preferences: self.preferences.clone(),
-            device: self.device.clone(),
-            local: self.local.clone(),
-            eds_path: self.eds_path.clone(),
-            profile_path: self.toml_path.clone(),
-            eds_profiles: self.profiles.clone(),
-            selected_eds: self.selected,
+            self.status.state
         }
     }
 
-    fn save_session(&mut self) {
-        if self.session.is_none() {
-            return;
-        }
-        let draft = self.session_snapshot();
-        let session = self.session.as_mut().unwrap();
-        session.check_at = Instant::now() + Duration::from_secs(1);
-        if draft != session.saved {
-            match draft.save(&session.path) {
-                Ok(()) => {
-                    session.saved = draft;
-                    session.error = None;
-                }
-                Err(error) => {
-                    session.error = Some(format!("Could not save last session — {error}"))
-                }
-            }
-        }
+    fn needs_repaint(&self) -> bool {
+        self.connection.is_some()
+            || self.capturing
+            || self.bench.is_some()
+            || self.identity_task.is_some()
     }
 
     fn load_profile(&mut self) {
@@ -324,11 +340,17 @@ impl App {
         (s.device_ip, s.local_ip) = self.addresses()?;
         Ok(s)
     }
-    fn connect(&mut self) {
+    fn connect(&mut self, reserved_ports: &[(Ipv4Addr, u16)]) {
         self.error = None;
         self.notice = None;
         let result = (|| {
             let s = self.current()?;
+            if s.local_udp_port != 0 && reserved_ports.contains(&(s.local_ip, s.local_udp_port)) {
+                return Err(format!(
+                    "UDP {}:{} is already reserved by another device. Choose port 0 or another supported bind endpoint.",
+                    s.local_ip, s.local_udp_port
+                ));
+            }
             let physical = !(s.device_ip.is_loopback() && s.local_ip.is_loopback());
             if physical && !self.bench_confirmed {
                 return Err("Confirm the isolated bench connection".into());
@@ -424,7 +446,7 @@ impl App {
             }
         }
     }
-    fn benchmark(&mut self, ctx: &egui::Context) {
+    fn benchmark(&mut self) {
         let Some(bench) = &mut self.bench else {
             return;
         };
@@ -444,7 +466,7 @@ impl App {
                     return;
                 }
                 bench.transitioned = true;
-                self.connect();
+                self.connect(&[]);
                 return;
             }
         }
@@ -471,6 +493,13 @@ impl App {
             |s| (s.output_rpi_us, s.input_rpi_us),
         );
         let setup_error = self.error.as_deref().unwrap_or_default();
+        let identity_serial = self.status.identity.as_ref().map_or(0, |id| id.serial);
+        let adapter_ip = self
+            .active
+            .as_ref()
+            .map_or(self.device.as_str().to_string(), |cfg| {
+                cfg.device_ip.to_string()
+            });
         let (seen, unchanged, written, overrun, disk_error) = self
             .capture
             .as_ref()
@@ -486,7 +515,7 @@ impl App {
             })
             .unwrap_or_default();
         let text = format!(
-            "state = {:?}\nschedule = {:?}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
+            "state = {:?}\nschedule = {:?}\nadapter_ip = {adapter_ip:?}\nidentity_serial = {identity_serial}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
             self.status.state,
             format!("{:?}", self.preferences.schedule),
             self.status.valid,
@@ -501,24 +530,21 @@ impl App {
             self.generation
         );
         let _ = fs::write(directory.join("scanner.toml"), text);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.bench = None;
     }
 }
 
-impl Drop for App {
+impl Drop for Device {
     fn drop(&mut self) {
         if let Some(c) = self.connection.take() {
             c.stop();
             c.join();
         }
         self.stop_capture();
-        self.save_session();
     }
 }
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.poll();
-        self.benchmark(ctx);
+impl Device {
+    fn show(&mut self, ctx: &egui::Context, reserved_ports: &[(Ipv4Addr, u16)]) {
         let online = self.connection.is_some();
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -533,12 +559,7 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label("EtherNet/IP  /  Class 1 cyclic I/O");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let state = if self.status.state.is_empty() {
-                        "Offline"
-                    } else {
-                        self.status.state
-                    };
-                    ui.label(RichText::new(state).strong().color(
+                    ui.label(RichText::new(self.state_label()).strong().color(
                         if self.status.network_error.is_some() || self.status.cip_error.is_some() {
                             RED
                         } else if online {
@@ -556,11 +577,207 @@ impl eframe::App for App {
             .default_width(480.0)
             .min_width(380.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.setup(ui));
+                ui.push_id(self.id, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.setup(ui, reserved_ports));
+                });
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.dashboard(ui));
+            ui.push_id(self.id, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.dashboard(ui));
+            });
         });
+    }
+}
+
+struct App {
+    devices: Vec<Device>,
+    selected: usize,
+    next_id: u64,
+    remove_confirmed: bool,
+    session: Option<RememberedSession>,
+}
+
+impl App {
+    fn new(benchmarks: Vec<Benchmark>, session_path: Option<PathBuf>) -> Self {
+        let mut app = Self {
+            devices: Vec::new(),
+            selected: 0,
+            next_id: 1,
+            remove_confirmed: false,
+            session: None,
+        };
+        if !benchmarks.is_empty() {
+            for bench in benchmarks {
+                app.devices.push(Device::new(app.next_id, Some(bench)));
+                app.next_id += 1;
+            }
+            return app;
+        }
+        if let Some(path) = session_path {
+            let error = match Workspace::load(&path) {
+                Ok(Some(saved)) => {
+                    app.selected = saved.selected_device;
+                    for device in saved.devices {
+                        app.devices.push(Device::restore(app.next_id, device));
+                        app.next_id += 1;
+                    }
+                    None
+                }
+                Ok(None) => None,
+                Err(error) => Some(format!("Could not restore last session — {error}")),
+            };
+            if app.devices.is_empty() {
+                app.add_device();
+            }
+            app.session = Some(RememberedSession {
+                path,
+                saved: app.snapshot(),
+                check_at: Instant::now(),
+                error,
+            });
+        } else {
+            app.add_device();
+            app.devices[0].error = Some(
+                "LOCALAPPDATA is unavailable. Use named TOML profiles to save settings.".into(),
+            );
+        }
+        app
+    }
+
+    fn add_device(&mut self) {
+        self.devices.push(Device::new(self.next_id, None));
+        self.next_id += 1;
+        self.selected = self.devices.len() - 1;
+        self.remove_confirmed = false;
+    }
+
+    fn snapshot(&self) -> Workspace {
+        Workspace {
+            selected_device: self.selected,
+            devices: self.devices.iter().map(Device::snapshot).collect(),
+        }
+    }
+
+    fn save_session(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        let draft = self.snapshot();
+        let session = self.session.as_mut().unwrap();
+        session.check_at = Instant::now() + Duration::from_secs(1);
+        if draft != session.saved {
+            match draft.save(&session.path) {
+                Ok(()) => {
+                    session.saved = draft;
+                    session.error = None;
+                }
+                Err(error) => {
+                    session.error = Some(format!("Could not save last session — {error}"));
+                }
+            }
+        }
+    }
+
+    fn device_list(&mut self, ui: &mut Ui) {
+        let prior = self.selected;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Devices");
+            egui::ComboBox::from_id_salt("selected-device")
+                .selected_text(self.devices[self.selected].list_label())
+                .show_ui(ui, |ui| {
+                    for (index, device) in self.devices.iter().enumerate() {
+                        ui.selectable_value(&mut self.selected, index, device.list_label());
+                    }
+                });
+            if self.selected != prior {
+                self.remove_confirmed = false;
+            }
+            if ui.button("Add device").clicked() {
+                self.add_device();
+            }
+            let can_remove = self.devices.len() > 1 && !self.devices[self.selected].needs_repaint();
+            let device = &mut self.devices[self.selected];
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut device.name).id_salt(device.id).desired_width(140.0));
+            if ui
+                .add_enabled(can_remove, egui::Button::new("Remove device"))
+                .on_disabled_hover_text("Disconnect and stop capture before removing a device. Keep at least one device.")
+                .clicked()
+            {
+                self.remove_confirmed = true;
+            }
+            self.remove_confirmed &= can_remove;
+        });
+        if self.remove_confirmed {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Remove this setup from the saved device list?");
+                if ui.button("Remove setup").clicked() {
+                    self.devices.remove(self.selected);
+                    self.selected = self.selected.min(self.devices.len() - 1);
+                    self.remove_confirmed = false;
+                } else if ui.button("Cancel").clicked() {
+                    self.remove_confirmed = false;
+                }
+            });
+        }
+        if let Some(session) = &self.session {
+            if let Some(error) = &session.error {
+                ui.colored_label(AMBER, error);
+            } else {
+                ui.small("Device setups are saved automatically")
+                    .on_hover_text(session.path.display().to_string());
+            }
+        }
+    }
+
+    fn reserved_ports(&self) -> Vec<(Ipv4Addr, u16)> {
+        self.devices
+            .iter()
+            .enumerate()
+            .filter(|(index, device)| *index != self.selected && device.connection.is_some())
+            .filter_map(|(_, device)| device.active.as_ref())
+            .filter(|settings| settings.local_udp_port != 0)
+            .map(|settings| (settings.local_ip, settings.local_udp_port))
+            .collect()
+    }
+}
+
+impl Device {
+    fn list_label(&self) -> String {
+        let name = if self.name.trim().is_empty() {
+            "Unnamed device"
+        } else {
+            &self.name
+        };
+        let capture = if self.capturing { " · CSV armed" } else { "" };
+        format!("{name} · {} · {}{capture}", self.device, self.state_label())
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        for device in &self.devices {
+            if let Some(connection) = &device.connection {
+                connection.stop();
+            }
+        }
+        self.save_session();
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let benchmarking = self.devices.iter().any(|device| device.bench.is_some());
+        for device in &mut self.devices {
+            device.poll();
+            device.benchmark();
+        }
+        if benchmarking && self.devices.iter().all(|device| device.bench.is_none()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        egui::TopBottomPanel::top("devices").show(ctx, |ui| self.device_list(ui));
+        let reserved_ports = self.reserved_ports();
+        self.devices[self.selected].show(ctx, &reserved_ports);
         if self
             .session
             .as_ref()
@@ -571,7 +788,7 @@ impl eframe::App for App {
         if let Some(session) = &self.session {
             ctx.request_repaint_after(session.check_at.saturating_duration_since(Instant::now()));
         }
-        if online || self.capturing || self.bench.is_some() || self.identity_task.is_some() {
+        if self.devices.iter().any(Device::needs_repaint) {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
     }
@@ -711,8 +928,8 @@ fn edit_fields(
     false
 }
 
-impl App {
-    fn setup(&mut self, ui: &mut Ui) {
+impl Device {
+    fn setup(&mut self, ui: &mut Ui, reserved_ports: &[(Ipv4Addr, u16)]) {
         let online = self.connection.is_some();
         title(ui, "01", "Device setup");
         ui.add_enabled_ui(!online && !self.capturing, |ui| {
@@ -738,9 +955,6 @@ impl App {
                         self.replace_profile = None;
                     }
                 });
-            }
-            if let Some(session) = &self.session {
-                ui.small("Last setup saved automatically").on_hover_text(session.path.display().to_string());
             }
             ui.horizontal(|ui| {
                 ui.label("EDS file");
@@ -978,7 +1192,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 if ui.button("Connect").clicked() {
-                    self.connect();
+                    self.connect(reserved_ports);
                 }
                 ui.selectable_value(
                     &mut self.preferences.schedule,
@@ -997,13 +1211,6 @@ impl App {
         }
         if let Some(n) = &self.notice {
             ui.colored_label(CYAN, n);
-        }
-        if let Some(error) = self
-            .session
-            .as_ref()
-            .and_then(|session| session.error.as_ref())
-        {
-            ui.colored_label(AMBER, error);
         }
     }
     fn select_profile(&mut self, i: Option<usize>) {
@@ -1366,32 +1573,68 @@ mod tests {
     }
 
     #[test]
-    fn restores_edits_and_eds_without_restoring_write_permission() {
+    fn migrates_single_device_and_restores_two_independent_setups() {
         let directory = temporary("session");
         let path = directory.join("last-session.toml");
+        fs::create_dir(&directory).unwrap();
+        let mut legacy = Device::new(1, None);
+        legacy.profiles = eds::parse(include_str!("../samples/loopback.eds")).unwrap();
+        legacy.select_profile(Some(0));
+        legacy.settings.input_rpi_us = 8_000;
+        legacy.device = "in-progress address".into();
+        legacy.local = "127.0.0.2".into();
+        legacy.eds_path = "previous adapter.eds".into();
+        legacy.toml_path = "saved profile.toml".into();
+        legacy.preferences.rotate_seconds = 15;
+        legacy.preferences.schedule = Schedule::Tokio;
+        let saved = legacy.snapshot();
+        fs::write(&path, toml::to_string_pretty(&saved.setup).unwrap()).unwrap();
+
         let expected = {
-            let mut app = App::new(None, Some(path.clone()));
-            app.profiles = eds::parse(include_str!("../samples/loopback.eds")).unwrap();
-            app.select_profile(Some(0));
-            app.settings.input_rpi_us = 8_000;
-            app.device = "in-progress address".into();
-            app.local = "127.0.0.2".into();
-            app.eds_path = "previous adapter.eds".into();
-            app.toml_path = "saved profile.toml".into();
-            app.preferences.rotate_seconds = 15;
-            app.preferences.schedule = Schedule::Tokio;
-            app.bench_confirmed = true;
-            app.writes_confirmed = true;
-            app.output_entries.push("uncommitted output".into());
-            app.session_snapshot()
+            let mut app = App::new(Vec::new(), Some(path.clone()));
+            assert_eq!(app.devices.len(), 1);
+            assert_eq!(app.devices[0].snapshot(), saved);
+            app.devices[0].name = "First adapter".into();
+            app.devices[0].bench_confirmed = true;
+            app.devices[0].writes_confirmed = true;
+            app.devices[0]
+                .output_entries
+                .push("uncommitted output".into());
+            app.add_device();
+            let second = &mut app.devices[1];
+            assert!(!second.bench_confirmed && !second.writes_confirmed);
+            assert!(second.profiles.is_empty());
+            second.name = "Second adapter".into();
+            second.device = "127.0.0.3".into();
+            second.preferences.directory = "second-capture".into();
+            second.settings.input_rpi_us = 16_000;
+            app.snapshot()
         };
-        let restored = App::new(None, Some(path.clone()));
-        assert_eq!(restored.session_snapshot(), expected);
-        assert!(!restored.bench_confirmed && !restored.writes_confirmed && !restored.capturing);
-        assert!(restored.connection.is_none() && restored.output_entries.is_empty());
+        let restored = App::new(Vec::new(), Some(path.clone()));
+        assert_eq!(restored.snapshot(), expected);
+        assert_eq!(restored.selected, 1);
+        for device in &restored.devices {
+            assert!(!device.bench_confirmed && !device.writes_confirmed && !device.capturing);
+            assert!(device.connection.is_none() && device.output_entries.is_empty());
+        }
         drop(restored);
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_reserved_fixed_udp_port_before_connecting() {
+        let mut device = Device::new(1, None);
+        device.settings.local_udp_port = 2222;
+        device.connect(&[(Ipv4Addr::LOCALHOST, 2222)]);
+        assert!(device.connection.is_none());
+        assert!(
+            device
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("already reserved")
+        );
     }
 
     #[test]
@@ -1399,7 +1642,7 @@ mod tests {
         let directory = temporary("profiles");
         fs::create_dir(&directory).unwrap();
         let path = directory.join("profile.toml");
-        let mut app = App::new(None, Some(directory.join("last-session.toml")));
+        let mut app = Device::new(1, None);
         app.toml_path = path.display().to_string();
         app.device = "127.0.0.2".into();
         app.preferences.capacity = 200;
@@ -1421,7 +1664,6 @@ mod tests {
         assert_eq!(app.device, "127.0.0.2");
         assert_eq!(app.preferences.capacity, 800);
         assert_eq!(app.preferences.rotate_bytes, 4_096);
-        app.session = None;
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
     }

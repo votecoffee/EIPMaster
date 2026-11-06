@@ -18,7 +18,7 @@ BINARIES = {"assembly-scanner": 2, "eipmaster-cli": 3}
 ASSETS = (
     "LICENSE", "QUICKSTART.md", "README.md", "ROADMAP.md", "VERIFICATION.md",
     "samples/loopback.eds", "samples/loopback.toml", "samples/mapped-loopback.toml",
-    "tools/loopback_adapter.py", "tools/join_capture.py", "tools/test_cli.py",
+    "tools/loopback_adapter.py", "tools/join_capture.py", "tools/test_cli.py", "tools/benchmark.py",
 )
 NOTICE_FILE = re.compile(
     r"(^|[-_.])(licen[cs]e|copying|copyright|notice|ofl|ufl|unlicense)([-_.]|$)", re.I

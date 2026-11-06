@@ -1,5 +1,6 @@
 """Independent, loopback-only EtherNet/IP Class 1 test fixture."""
 import argparse
+from ipaddress import IPv4Address
 import json
 import math
 from pathlib import Path
@@ -44,8 +45,8 @@ def rr_reply(cip, *extra):
     )
 
 
-def sockaddr(port):
-    return struct.pack(">HH4s8x", 2, port, socket.inet_aton(IP))
+def sockaddr(address, port):
+    return struct.pack(">HH4s8x", 2, port, socket.inet_aton(address))
 
 
 def io_packet(connection, seq, data):
@@ -62,7 +63,7 @@ def spacing(stamps):
     }
 
 
-def udp_loop(udp, endpoint, connection, api, mode, stop, report):
+def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     sent, received = [], []
     output_values = set()
     owner = mode == "owner"
@@ -106,7 +107,7 @@ def udp_loop(udp, endpoint, connection, api, mode, stop, report):
             deadline += slots * period
             seq = (seq + 1) & 0xFFFFFFFF
             if not (mode == "faults" and seq == 60) and not (mode == "stall" and seq > 75):
-                value = struct.pack("<I", seq // 16)
+                value = struct.pack("<I", value_base + seq // 16)
                 packet = io_packet(connection, seq, (bytes((1, 0, 0, 0)) if owner else b"") + value)
                 udp.sendto(packet, endpoint)
                 sent.append(time.perf_counter_ns())
@@ -129,6 +130,12 @@ def serve(tcp, udp, mode, report):
     stop = threading.Event()
     io = None
     owner = mode == "owner"
+    adapter_ip = tcp.getsockname()[0]
+    scanner_ip = tcp.getpeername()[0]
+    adapter_index = int(IPv4Address(adapter_ip)) - int(IPv4Address(IP))
+    serial_number = 0x12345678 + adapter_index
+    value_base = (adapter_index % 1000) * 100_000
+    report.update(serial_number=serial_number, value_base=value_base)
     path = bytes.fromhex("20 04 24 01 2C 64 2C 65" if owner else "20 04 24 01 2C FE 2C 65")
     try:
         while True:
@@ -151,7 +158,7 @@ def serve(tcp, udp, mode, report):
                 body = items[0xB2][6:]
                 if service == 1 and object_class == 1:
                     name = b"Loopback Adapter"
-                    reply = struct.pack("<HHHBBHIB", 0, 12, 1, 1, 0, 0x0060, 0x12345678, len(name)) + name
+                    reply = struct.pack("<HHHBBHIB", 0, 12, 1, 1, 0, 0x0060, serial_number, len(name)) + name
                     response = rr_reply(b"\x81\0\0\0" + reply)
                 elif service == 0x54 and object_class == 6:
                     assert io is None
@@ -165,7 +172,7 @@ def serve(tcp, udp, mode, report):
                     assert ot_params & 0xE3FF == (0x4008 if owner else 0x4002)
                     assert to_params & 0xE3FF == (0x400A if owner else 0x4006)
                     family, port, address = struct.unpack(">HH4s8x", items[0x8001])
-                    assert family == 2 and socket.inet_ntoa(address) == IP and port != 0
+                    assert family == 2 and socket.inet_ntoa(address) == scanner_ip and port != 0
                     report.update(ot_requested_us=ot_rpi, to_requested_us=to_rpi)
                     if mode == "reject":
                         response = rr_reply(bytes.fromhex("D4 00 01 01 09 01"))
@@ -174,9 +181,9 @@ def serve(tcp, udp, mode, report):
                         reply = struct.pack("<IIHHIIIBB", OT_ID, to, serial, vendor, origin,
                                             ot_api, to_api, 0, 0)
                         response = rr_reply(b"\xD4\0\0\0" + reply,
-                                            (0x8000, sockaddr(udp.getsockname()[1])))
+                                            (0x8000, sockaddr(adapter_ip, udp.getsockname()[1])))
                         io = threading.Thread(target=udp_loop,
-                                              args=(udp, (IP, port), to, to_api, mode, stop, report))
+                                              args=(udp, (scanner_ip, port), to, to_api, mode, value_base, stop, report))
                         io.start()
                 elif service == 0x4E and object_class == 6:
                     assert struct.unpack_from("<HHI", body, 2) == (serial, vendor, origin)
@@ -199,10 +206,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--mode", choices=("normal", "faults", "stall", "reject", "different-api", "owner", "reconnect"), default="normal")
+    parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
+    if not args.address.is_loopback:
+        parser.error("--address must be an IPv4 loopback address")
+    address = str(args.address)
     report = {"mode": args.mode, "forward_close": False}
     with socket.socket() as listener:
-        listener.bind((IP, 44818))
+        listener.bind((address, 44818))
         listener.listen(1)
         listener.settimeout(30)
         print("Ready on loopback", flush=True)
@@ -210,7 +221,7 @@ def main():
             conn, _ = listener.accept()
             with conn, socket.socket(type=socket.SOCK_DGRAM) as udp:
                 conn.settimeout(20)
-                udp.bind((IP, 0))
+                udp.bind((address, 0))
                 serve(conn, udp, args.mode, report)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
