@@ -132,6 +132,7 @@ def udp_loop(udp, source, endpoint, connection, api, mode, value_base, stop, rep
             time.sleep(min((deadline - now - 160_000) / 1e9, 0.0004))
     report.update({
         "ot_received": len(received), "ot_sequence_gaps": missed, "ot_invalid": invalid,
+        "ot_received_after_last_to": sum(stamp >= sent[-1] for stamp in received) if sent else len(received),
         "ot_receive_spacing": spacing(received), "to_sent": len(sent),
         "to_last_sequence": last_sent_sequence,
         "to_last_gap_us": (sent[-1] - sent[-2]) // 1000 if len(sent) >= 2 else None,

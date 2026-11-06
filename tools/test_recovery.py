@@ -226,6 +226,9 @@ def concurrent(exe, root):
     assert 0 < timeout["last_sequence"] <= recovered_adapters[0]["to_last_sequence"] == 75
     assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
     assert timeout["last_udp_age_us"] <= timeout["valid_input_silence_us"]
+    assert 0 < timeout["ot_sends_during_silence"] <= recovered["sent"]
+    assert recovered_adapters[0]["ot_received_after_last_to"] > 0
+    assert 0 < timeout["last_check_gap_us"] <= timeout["longest_check_gap_us"] <= timeout["valid_input_silence_us"]
     assert "receive_timeout" not in restored and "receive_timeout" not in recovered
     assert recovered["accepted"] == prior["accepted"] + restored["accepted"]
     assert recovered["accepted"] == recovered["written"] + recovered["after_capture_deadline"]

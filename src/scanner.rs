@@ -246,6 +246,11 @@ pub struct ReceiveTimeout {
     pub valid_input_silence_us: u64,
     pub last_udp_age_us: Option<u64>,
     pub last_sequence: Option<u32>,
+    /// Successful sends observed by the receiver since its last accepted input.
+    pub ot_sends_during_silence: u64,
+    /// Gaps between the timestamps used for the receive watchdog checks.
+    pub last_check_gap_us: u64,
+    pub longest_check_gap_us: u64,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1116,6 +1121,9 @@ fn receive(
     let mut packet = [0; 65_536];
     let mut last_seq: Option<u32> = None;
     let mut last_udp = None;
+    let mut sent_at_last_input = 0;
+    let mut previous_check = started;
+    let mut longest_check_gap = Duration::ZERO;
     let mut seen = 0u64;
     let mut status = shared.status.lock().unwrap().clone();
     let mut spacing = Histogram::new(reply.t_to_o_actual_rpi_us);
@@ -1126,6 +1134,9 @@ fn receive(
         }
         let result = receive_datagram(udp, &mut packet);
         let stamp = Instant::now();
+        let check_gap = stamp - previous_check;
+        previous_check = stamp;
+        longest_check_gap = longest_check_gap.max(check_gap);
         match result {
             Ok(Some((length, addr))) => {
                 if last_udp.replace(stamp).is_none() {
@@ -1159,6 +1170,8 @@ fn receive(
                                 spacing.add(stamp - last);
                             }
                             status.last_input = Some(stamp);
+                            sent_at_last_input = shared.tx.load(Relaxed);
+                            longest_check_gap = Duration::ZERO;
                             let first = status.valid == 0;
                             if first {
                                 status.first_input_after_open_us =
@@ -1195,6 +1208,9 @@ fn receive(
                 valid_input_silence_us: silence.as_micros() as u64,
                 last_udp_age_us: last_udp.map(|last| (stamp - last).as_micros() as u64),
                 last_sequence: last_seq,
+                ot_sends_during_silence: shared.tx.load(Relaxed) - sent_at_last_input,
+                last_check_gap_us: check_gap.as_micros() as u64,
+                longest_check_gap_us: longest_check_gap.as_micros() as u64,
             });
             status.timeouts += 1;
             status.retryable = true;

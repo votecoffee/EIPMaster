@@ -1683,6 +1683,12 @@ impl Device {
             if let Some(sequence) = timeout.last_sequence {
                 ui.small(format!("Last accepted packet sequence · {sequence}"));
             }
+            ui.small(format!(
+                "O->T sends during silence {} · Receive check gap {:.3} ms (longest {:.3} ms)",
+                timeout.ot_sends_during_silence,
+                timeout.last_check_gap_us as f64 / 1000.0,
+                timeout.longest_check_gap_us as f64 / 1000.0
+            ));
         }
         ui.label(format!(
             "Accepted {}  ·  Gap estimates {}  ·  Duplicates {}  ·  Late {}  ·  Invalid {}",
@@ -2076,6 +2082,9 @@ mod tests {
                 valid_input_silence_us: 48_100,
                 last_udp_age_us: Some(48_100),
                 last_sequence: Some(1),
+                ot_sends_during_silence: 38,
+                last_check_gap_us: 2_100,
+                longest_check_gap_us: 2_300,
             }),
             ..Status::default()
         };
@@ -2130,6 +2139,10 @@ mod tests {
         assert_eq!(
             connection["receive_timeout"]["limit_us"].as_integer(),
             Some(48_000)
+        );
+        assert_eq!(
+            connection["receive_timeout"]["ot_sends_during_silence"].as_integer(),
+            Some(38)
         );
         assert!(device.save_run_report().is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
@@ -2407,6 +2420,11 @@ mod tests {
             first["receive_timeout"]["limit_us"].as_integer(),
             Some(256_000)
         );
+        let timeout = &first["receive_timeout"];
+        assert!(timeout["ot_sends_during_silence"].as_integer().unwrap() > 0);
+        let last_gap = timeout["last_check_gap_us"].as_integer().unwrap();
+        let longest_gap = timeout["longest_check_gap_us"].as_integer().unwrap();
+        assert!(0 < last_gap && last_gap <= longest_gap);
         assert_eq!(restored["generation"].as_integer(), Some(2));
         assert_eq!(restored["state"].as_str(), Some("Closed"));
         assert!(restored.get("receive_timeout").is_none());

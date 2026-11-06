@@ -114,7 +114,10 @@ def check_timeout_multiplier(exe, root, legacy):
         check_capture_window(report, list(rows(parts_for(Path(report["csv_prefix"])))))
         if code == 3:
             assert result.returncode == 1 and report["state"] == "Timed out"
-            assert report["receive_timeout"]["limit_us"] == 48_000
+            timeout = report["receive_timeout"]
+            assert timeout["limit_us"] == 48_000
+            assert 0 < timeout["ot_sends_during_silence"] <= report["sent"]
+            assert fixture["ot_received_after_last_to"] > 0
         else:
             assert result.returncode == 0 and report["state"] == "Closed"
             assert report["receive_spacing"]["max_us"] >= 55_000 and report["sequence_gaps"] == 0
@@ -390,6 +393,8 @@ def main():
         assert timeout["waiting_for_first_input"] and timeout["limit_us"] == 2_000_000
         assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
         assert "last_sequence" not in timeout
+        assert 0 < timeout["ot_sends_during_silence"] <= report["sent"]
+        assert 0 < timeout["last_check_gap_us"] <= timeout["longest_check_gap_us"] <= timeout["valid_input_silence_us"]
         startup = report["startup_timing"]
         assert "forward_open_exchange_us" in startup and "first_send_after_open_us" in startup
         assert "first_input_after_open_us" not in startup
