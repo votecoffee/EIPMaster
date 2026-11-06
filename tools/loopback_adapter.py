@@ -1,5 +1,6 @@
 """Independent, loopback-only EtherNet/IP Class 1 test fixture."""
 import argparse
+from contextlib import nullcontext
 from ipaddress import IPv4Address
 import json
 import math
@@ -63,7 +64,7 @@ def spacing(stamps):
     }
 
 
-def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
+def udp_loop(udp, source, endpoint, connection, api, mode, value_base, stop, report):
     sent, received = [], []
     output_values = set()
     owner = mode == "owner"
@@ -112,16 +113,19 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
                 if mode == "invalid-input":
                     value = value[:-1]
                 packet = io_packet(connection, seq, (bytes((1, 0, 0, 0)) if owner else b"") + value)
-                udp.sendto(packet, endpoint)
+                source.sendto(packet, endpoint)
                 sent.append(time.perf_counter_ns())
+                if len(sent) == 1 and mode != "invalid-input":
+                    source_ip, source_port = source.getsockname()
+                    report["cyclic_io"]["first_input_source"] = f"{source_ip}:{source_port}"
                 last_sent_sequence = seq
                 if mode == "pause-different-api" and seq == 75:
                     deadline += 60_000_000
                     report["pause_after_sequence"] = seq
                 if mode == "faults" and seq == 80:
-                    udp.sendto(packet, endpoint)
-                    udp.sendto(io_packet(connection, 60, value), endpoint)
-                    udp.sendto(io_packet(connection, seq, value[:-1]), endpoint)
+                    source.sendto(packet, endpoint)
+                    source.sendto(io_packet(connection, 60, value), endpoint)
+                    source.sendto(io_packet(connection, seq, value[:-1]), endpoint)
         if deadline is None:
             time.sleep(0.00015)
         elif deadline - now > 250_000:
@@ -135,7 +139,7 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     })
 
 
-def serve(tcp, udp, mode, report, serial_delta=0):
+def serve(tcp, udp, source, mode, report, serial_delta=0):
     stop = threading.Event()
     io = None
     owner = mode == "owner"
@@ -194,12 +198,20 @@ def serve(tcp, udp, mode, report, serial_delta=0):
                         ) else (ot_rpi, to_rpi)
                         reply = struct.pack("<IIHHIIIBB", OT_ID, to, serial, vendor, origin,
                                             ot_api, to_api, 0, 0)
+                        adapter_port = udp.getsockname()[1]
                         response = rr_reply(b"\xD4\0\0\0" + reply,
-                                            (0x8000, sockaddr(adapter_ip, udp.getsockname()[1])))
+                                            (0x8000, sockaddr(adapter_ip, adapter_port)))
+                        report["cyclic_io"] = {
+                            "local_udp": f"{scanner_ip}:{port}",
+                            "output_destination": f"{adapter_ip}:{adapter_port}",
+                            "ot_connection_id": OT_ID,
+                            "to_connection_id": to,
+                        }
                         if mode == "delayed-start":
                             time.sleep(0.05)
                         io = threading.Thread(target=udp_loop,
-                                              args=(udp, (scanner_ip, port), to, to_api, udp_mode, value_base, stop, report))
+                                              args=(udp, source, (scanner_ip, port), to, to_api, udp_mode,
+                                                    value_base, stop, report))
                         io.start()
                 elif service == 0x4E and object_class == 6:
                     assert struct.unpack_from("<HHI", body, 2) == (serial, vendor, origin)
@@ -238,7 +250,7 @@ def main():
         "stall-close-reject", "qualify-close-reject",
         "slow-input", "pause-different-api",
         "identity-then-owner",
-        "delayed-start",
+        "delayed-start", "split-udp",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
@@ -272,7 +284,11 @@ def main():
                 udp.bind((address, 0))
                 attempt = {"forward_close": False} if record_attempts else report
                 replacement = args.mode in ("replacement", "qualify-replacement") and index == 1
-                serve(conn, udp, mode, attempt, serial_delta=int(replacement))
+                input_socket = socket.socket(type=socket.SOCK_DGRAM) if mode == "split-udp" else nullcontext(udp)
+                with input_socket as source:
+                    if source is not udp:
+                        source.bind((address, 0))
+                    serve(conn, udp, source, mode, attempt, serial_delta=int(replacement))
                 if record_attempts:
                     report["attempts"].append(attempt)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

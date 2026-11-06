@@ -294,6 +294,7 @@ pub struct Status {
     pub network_error: Option<String>,
     pub cip_error: Option<String>,
     pub actual: Option<(u32, u32)>,
+    pub cyclic_io: Option<CyclicIo>,
     pub forward_open_exchange_us: Option<u64>,
     pub first_udp_after_open_us: Option<u64>,
     pub first_input_after_open_us: Option<u64>,
@@ -311,6 +312,16 @@ pub struct Status {
     pub forward_close: Option<CloseOutcome>,
     pub retryable: bool,
     pub spacing: Spacing,
+}
+
+/// Socket endpoints and connection IDs used by an accepted Forward_Open.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct CyclicIo {
+    pub local_udp: SocketAddr,
+    pub output_destination: SocketAddr,
+    pub first_input_source: Option<SocketAddr>,
+    pub ot_connection_id: u32,
+    pub to_connection_id: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -835,6 +846,13 @@ fn run(
         {
             let mut status = shared.status.lock().unwrap();
             status.actual = Some((reply.o_to_t_actual_rpi_us, reply.t_to_o_actual_rpi_us));
+            status.cyclic_io = Some(CyclicIo {
+                local_udp: local_addr,
+                output_destination: peer,
+                first_input_source: None,
+                ot_connection_id: reply.o_to_t_connection_id,
+                to_connection_id: reply.t_to_o_connection_id,
+            });
             status.state = "Waiting for input";
         }
         thread::scope(|scope| {
@@ -1145,6 +1163,9 @@ fn receive(
                             if first {
                                 status.first_input_after_open_us =
                                     Some((stamp - open_completed).as_micros() as u64);
+                                if let Some(cyclic_io) = &mut status.cyclic_io {
+                                    cyclic_io.first_input_source = Some(addr);
+                                }
                             }
                             shared.input_times.record(stamp, first);
                             status.state = "Receiving";

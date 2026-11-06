@@ -1626,6 +1626,19 @@ impl Device {
                     ));
                 }
             }
+            if let Some(io) = self.status.cyclic_io {
+                let input = io
+                    .first_input_source
+                    .map_or_else(|| "—".into(), |addr| addr.to_string());
+                ui.small(format!(
+                    "UDP local {} · O->T destination {} · First T->O source {input}",
+                    io.local_udp, io.output_destination
+                ));
+                ui.small(format!(
+                    "Connection IDs · O->T 0x{:08X} · T->O 0x{:08X}",
+                    io.ot_connection_id, io.to_connection_id
+                ));
+            }
             let timeout = active.connection_timeout(self.status.actual.map(|(_, input)| input));
             if let (Some(factor), Some(us)) = (timeout.factor, timeout.receive_watchdog_us) {
                 ui.small(format!(
@@ -2328,6 +2341,12 @@ mod tests {
         assert_eq!(link["requested_to_us"].as_integer(), Some(1000));
         assert_eq!(link["actual_ot_us"].as_integer(), Some(1250));
         assert_eq!(link["actual_to_us"].as_integer(), Some(1500));
+        let io = &link["cyclic_io"];
+        let local: std::net::SocketAddr = io["local_udp"].as_str().unwrap().parse().unwrap();
+        assert!(local.ip().is_loopback() && local.port() != 0);
+        assert_eq!(io["first_input_source"], io["output_destination"]);
+        assert_eq!(io["ot_connection_id"].as_integer(), Some(0x1234ABCD));
+        assert!(io["to_connection_id"].as_integer().unwrap() > 0);
         let startup = &link["startup_timing"];
         assert!(startup["forward_open_exchange_us"].is_integer());
         assert!(startup["first_send_after_open_us"].is_integer());

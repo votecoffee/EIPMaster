@@ -3,7 +3,8 @@ use crate::{
     capture::FieldSummary,
     model::{CaptureMode, ConnectionTimeout},
     scanner::{
-        CloseOutcome, Identity, ReceiveTimeout, Schedule, SendTiming, Spacing, StartupTiming,
+        CloseOutcome, CyclicIo, Identity, ReceiveTimeout, Schedule, SendTiming, Spacing,
+        StartupTiming,
     },
     settings_file,
 };
@@ -60,6 +61,7 @@ struct ConnectionReport {
     forward_close: Option<CloseOutcome>,
     sent: u64,
     skipped_deadlines: u64,
+    cyclic_io: Option<CyclicIo>,
     startup_timing: Option<StartupTiming>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
@@ -142,6 +144,7 @@ impl Device {
             forward_close: status.forward_close.clone(),
             sent: self.tx,
             skipped_deadlines: self.skipped,
+            cyclic_io: status.cyclic_io,
             startup_timing: status.startup_timing(self.send_timing),
             receive_spacing: status.spacing,
             send_spacing: self.tx_spacing,

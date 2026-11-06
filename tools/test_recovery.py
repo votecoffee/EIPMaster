@@ -210,6 +210,10 @@ def concurrent(exe, root):
     assert prior["forward_close"] == restored["forward_close"] == {"outcome": "confirmed"}
     assert (prior["generation"], restored["generation"]) == (1, 2)
     assert recovered["startup_timing"] == restored["startup_timing"]
+    assert recovered["cyclic_io"] == restored["cyclic_io"]
+    assert [prior["cyclic_io"], restored["cyclic_io"]] == [
+        adapter["cyclic_io"] for adapter in recovered_adapters
+    ]
     for attempt in (prior, restored):
         startup = attempt["startup_timing"]
         assert "forward_open_exchange_us" in startup and "first_send_after_open_us" in startup

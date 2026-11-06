@@ -376,6 +376,16 @@ The three I/O columns are measured from the end of the Forward_Open exchange, us
 
 Three one-second headless qualification trials requested and negotiated 1,000 microseconds in both directions. They wrote 998, 996, and 974 rows, with receive p99 spacing of 1,488, 1,533, and 2,028 microseconds and longest gaps of 2,403, 3,499, and 5,191 microseconds. All confirmed Forward_Close and had zero sequence gaps, watchdog timeouts, and CSV overruns. The fixture skipped 2, 5, and 27 send slots before assigning sequence numbers.
 
+## Class 1 packet trace correlation
+
+A headless Windows fixture bound separate adapter ports to receive O-to-T traffic and send T-to-O inputs. The scanner requested and negotiated 8 ms in both directions, saved 251 rows in two seconds, and confirmed Forward_Close. The scanner and fixture agreed on the actual local UDP port (57113), the output destination port (57111), the first valid input source port (57112), and both connection IDs. There were zero receive sequence gaps, watchdog timeouts, or CSV overruns.
+
+The CLI reports omit the input source for silent or malformed traffic and omit the entire `cyclic_io` table if Forward_Open is rejected or never sent. The recovery test matched each attempt to the fixture's endpoints and connection IDs. Headless GUI backend checks verified the saved endpoint and ID fields.
+
+An independent OpENer capture requested and negotiated 30 ms in both directions and saved 101 rows with no sequence gaps, watchdog timeouts, or CSV overruns. Its outgoing destination and first input source were both `127.0.0.2:2222`.
+
+The full headless qualification regression passed on the third run. Two earlier runs each had one 1 ms trial end at the 32 ms receive watchdog, after 33.350 ms and 32.647 ms of terminal input silence. Both confirmed Forward_Close and retained their endpoint and connection ID records. The fixture measured a 39.052 ms send gap in the second timeout case. The first timeout's cause remains unconfirmed. The watchdog and requested intervals were the same across runs.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.
