@@ -2,7 +2,7 @@
 
 mod gui;
 
-use assembly_scanner::{capture, eds, model, scanner};
+use assembly_scanner::{capture, eds, model, scanner, settings_file};
 
 fn main() -> eframe::Result {
     gui::run()

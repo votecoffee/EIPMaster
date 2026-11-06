@@ -122,7 +122,8 @@ pub struct Status {
     pub spacing: Spacing,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Schedule {
     Deadline,
     Tokio,
@@ -155,7 +156,16 @@ impl Connection {
         slot: Slot,
         expected: IdentityKey,
     ) -> std::result::Result<Self, String> {
-        Self::start_inner(settings, slot, 1, Schedule::Deadline, false, Some(expected))
+        Self::start_verified_input_with_schedule(settings, slot, expected, Schedule::Deadline)
+    }
+
+    pub fn start_verified_input_with_schedule(
+        settings: Settings,
+        slot: Slot,
+        expected: IdentityKey,
+        schedule: Schedule,
+    ) -> std::result::Result<Self, String> {
+        Self::start_inner(settings, slot, 1, schedule, false, Some(expected))
     }
 
     fn start_inner(

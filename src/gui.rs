@@ -3,10 +3,12 @@ use crate::{
     eds::{self, Profile},
     model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
     scanner::{self, Connection, Identity, Schedule, Spacing, Status},
+    settings_file::{self, Preferences, Session},
 };
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::{
     fs,
+    io::ErrorKind,
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{atomic::Ordering::Relaxed, mpsc},
@@ -59,7 +61,7 @@ pub fn run() -> eframe::Result {
             style.visuals.selection.bg_fill = Color32::from_rgb(22, 83, 87);
             style.spacing.item_spacing = egui::vec2(9.0, 7.0);
             cc.egui_ctx.set_style_of(egui::Theme::Dark, style);
-            Ok(Box::new(App::new(bench)))
+            Ok(Box::new(App::new(bench, Session::path())))
         }),
     )
 }
@@ -74,12 +76,22 @@ struct Benchmark {
     reconnect: bool,
     transitioned: bool,
 }
+
+struct RememberedSession {
+    path: PathBuf,
+    saved: Session,
+    check_at: Instant,
+    error: Option<String>,
+}
+
 struct App {
     settings: Settings,
     device: String,
     local: String,
     eds_path: String,
     toml_path: String,
+    replace_profile: Option<PathBuf>,
+    session: Option<RememberedSession>,
     profiles: Vec<Profile>,
     selected: Option<usize>,
     bench_confirmed: bool,
@@ -89,30 +101,28 @@ struct App {
     active: Option<Settings>,
     status: Status,
     generation: u64,
-    schedule: Schedule,
     tx: u64,
     skipped: u64,
     tx_spacing: Spacing,
     capture: Option<Capture>,
     slot: capture::Slot,
     capturing: bool,
-    directory: String,
-    capacity: usize,
-    rotate_bytes: u64,
-    rotate_seconds: u64,
+    preferences: Preferences,
     notice: Option<String>,
     error: Option<String>,
     identity_task: Option<mpsc::Receiver<Result<Identity, String>>>,
     bench: Option<Benchmark>,
 }
 impl App {
-    fn new(bench: Option<Benchmark>) -> Self {
+    fn new(bench: Option<Benchmark>, session_path: Option<PathBuf>) -> Self {
         let mut app = Self {
             settings: Settings::default(),
             device: "127.0.0.1".into(),
             local: "127.0.0.1".into(),
             eds_path: "samples/loopback.eds".into(),
-            toml_path: "samples/loopback.toml".into(),
+            toml_path: String::new(),
+            replace_profile: None,
+            session: None,
             profiles: vec![],
             selected: None,
             bench_confirmed: false,
@@ -122,32 +132,25 @@ impl App {
             active: None,
             status: Status::default(),
             generation: 0,
-            schedule: Schedule::Deadline,
             tx: 0,
             skipped: 0,
             tx_spacing: Spacing::default(),
             capture: None,
             slot: Default::default(),
             capturing: false,
-            directory: "captures".into(),
-            capacity: 32_768,
-            rotate_bytes: 0,
-            rotate_seconds: 0,
+            preferences: Preferences::default(),
             notice: None,
             error: None,
             identity_task: None,
             bench,
         };
         if let Some(bench) = &app.bench {
-            app.directory = bench.directory.to_string_lossy().into_owned();
-            app.schedule = bench.schedule;
-            app.rotate_seconds = 3;
+            app.preferences.directory = bench.directory.to_string_lossy().into_owned();
+            app.preferences.schedule = bench.schedule;
+            app.preferences.rotate_seconds = 3;
             if let Some(profile) = &bench.profile {
-                let result = fs::read_to_string(profile)
-                    .map_err(|error| error.to_string())
-                    .and_then(|text| toml::from_str(&text).map_err(|error| error.to_string()));
-                match result {
-                    Ok(settings) => app.settings = settings,
+                match settings_file::load_profile(profile) {
+                    Ok((settings, _)) => app.settings = settings,
                     Err(error) => {
                         app.error = Some(format!("Could not load loopback settings: {error}"));
                         return app;
@@ -178,8 +181,130 @@ impl App {
             }
             app.start_capture();
             app.connect();
+        } else if let Some(path) = session_path {
+            let error = match Session::load(&path) {
+                Ok(Some(saved)) => {
+                    app.settings = saved.settings;
+                    app.preferences = saved.preferences;
+                    app.device = saved.device;
+                    app.local = saved.local;
+                    app.eds_path = saved.eds_path;
+                    app.toml_path = saved.profile_path;
+                    app.profiles = saved.eds_profiles;
+                    app.selected = saved.selected_eds;
+                    None
+                }
+                Ok(None) => None,
+                Err(error) => Some(format!("Could not restore last session — {error}")),
+            };
+            app.session = Some(RememberedSession {
+                path,
+                saved: app.session_snapshot(),
+                check_at: Instant::now(),
+                error,
+            });
+        } else {
+            app.error = Some(
+                "LOCALAPPDATA is unavailable. Use a named TOML profile to save settings.".into(),
+            );
         }
         app
+    }
+
+    fn session_snapshot(&self) -> Session {
+        Session {
+            settings: self.settings.clone(),
+            preferences: self.preferences.clone(),
+            device: self.device.clone(),
+            local: self.local.clone(),
+            eds_path: self.eds_path.clone(),
+            profile_path: self.toml_path.clone(),
+            eds_profiles: self.profiles.clone(),
+            selected_eds: self.selected,
+        }
+    }
+
+    fn save_session(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+        let draft = self.session_snapshot();
+        let session = self.session.as_mut().unwrap();
+        session.check_at = Instant::now() + Duration::from_secs(1);
+        if draft != session.saved {
+            match draft.save(&session.path) {
+                Ok(()) => {
+                    session.saved = draft;
+                    session.error = None;
+                }
+                Err(error) => {
+                    session.error = Some(format!("Could not save last session — {error}"))
+                }
+            }
+        }
+    }
+
+    fn load_profile(&mut self) {
+        self.replace_profile = None;
+        self.notice = None;
+        match settings_file::load_profile(Path::new(&self.toml_path)) {
+            Ok((settings, preferences)) => {
+                self.device = settings.device_ip.to_string();
+                self.local = settings.local_ip.to_string();
+                self.settings = settings;
+                if let Some(preferences) = preferences {
+                    self.preferences = preferences;
+                }
+                self.selected = None;
+                self.output_entries.clear();
+                self.bench_confirmed = false;
+                self.writes_confirmed = false;
+                self.error = None;
+                self.notice = Some("Loaded settings".into());
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn save_profile(&mut self, confirmed_path: Option<PathBuf>) {
+        let replace = confirmed_path.is_some();
+        let path = confirmed_path.unwrap_or_else(|| PathBuf::from(&self.toml_path));
+        self.replace_profile = None;
+        self.notice = None;
+        if self
+            .selected
+            .is_some_and(|index| !self.profiles[index].unsupported.is_empty())
+        {
+            self.error =
+                Some("Resolve the listed EDS profile issues in Manual mode before saving".into());
+            return;
+        }
+        let text = match self
+            .current()
+            .and_then(|settings| settings_file::profile_text(&settings, &self.preferences))
+        {
+            Ok(text) => text,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        let result = if replace {
+            settings_file::replace(&path, &text)
+        } else {
+            settings_file::write_new(&path, &text)
+        };
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some(format!("Saved settings to {}", path.display()));
+            }
+            Err(error) if !replace && error.kind() == ErrorKind::AlreadyExists => {
+                self.error = None;
+                self.replace_profile = Some(path);
+            }
+            Err(error) => self.error = Some(format!("Could not save {} — {error}", path.display())),
+        }
     }
     fn addresses(&self) -> Result<(Ipv4Addr, Ipv4Addr), String> {
         Ok((
@@ -219,7 +344,7 @@ impl App {
                 s.clone(),
                 self.slot.clone(),
                 next,
-                self.schedule,
+                self.preferences.schedule,
                 self.writes_confirmed,
             )?;
             self.generation = next;
@@ -246,12 +371,8 @@ impl App {
             .unwrap_or(&self.settings);
         match Capture::start(
             &self.slot,
-            capture::Options {
-                directory: PathBuf::from(&self.directory),
-                capacity: self.capacity,
-                rotate_bytes: self.rotate_bytes,
-                rotate_seconds: self.rotate_seconds,
-            },
+            self.preferences
+                .capture_options(PathBuf::from(&self.preferences.directory)),
             settings,
         ) {
             Ok(capture) => {
@@ -366,7 +487,7 @@ impl App {
         let text = format!(
             "state = {:?}\nschedule = {:?}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
             self.status.state,
-            format!("{:?}", self.schedule),
+            format!("{:?}", self.preferences.schedule),
             self.status.valid,
             self.status.gaps,
             self.status.duplicates,
@@ -382,6 +503,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
+
 impl Drop for App {
     fn drop(&mut self) {
         if let Some(c) = self.connection.take() {
@@ -389,6 +511,7 @@ impl Drop for App {
             c.join();
         }
         self.stop_capture();
+        self.save_session();
     }
 }
 impl eframe::App for App {
@@ -437,6 +560,16 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.dashboard(ui));
         });
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| Instant::now() >= session.check_at)
+        {
+            self.save_session();
+        }
+        if let Some(session) = &self.session {
+            ctx.request_repaint_after(session.check_at.saturating_duration_since(Instant::now()));
+        }
         if online || self.capturing || self.bench.is_some() || self.identity_task.is_some() {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
@@ -582,40 +715,32 @@ impl App {
         let online = self.connection.is_some();
         title(ui, "01", "Device setup");
         ui.add_enabled_ui(!online && !self.capturing, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Settings TOML");
-                ui.text_edit_singleline(&mut self.toml_path);
-                if ui.button("Load").clicked() {
-                    let result = fs::read_to_string(&self.toml_path).map_err(|e| e.to_string())
-                        .and_then(|text| toml::from_str::<Settings>(&text).map_err(|e| e.to_string()));
-                    match result {
-                        Ok(settings) => {
-                            self.device = settings.device_ip.to_string();
-                            self.local = settings.local_ip.to_string();
-                            self.settings = settings;
-                            self.selected = None;
-                            self.output_entries.clear();
-                            self.writes_confirmed = false;
-                            self.error = None;
-                        }
-                        Err(e) => self.error = Some(e),
-                    }
+                if ui.add(egui::TextEdit::singleline(&mut self.toml_path).desired_width(200.0).hint_text("Path to a TOML profile")).changed() {
+                    self.replace_profile = None;
                 }
-                if ui.button("Save").clicked() {
-                    let result = self.current().and_then(|s| {
-                        s.validate()?;
-                        toml::to_string_pretty(&s).map_err(|e| e.to_string())
-                    }).and_then(|s| {
-                        use std::io::Write;
-                        fs::OpenOptions::new().create_new(true).write(true).open(&self.toml_path)
-                            .and_then(|mut f| f.write_all(s.as_bytes())).map_err(|e| e.to_string())
-                    });
-                    match result {
-                        Ok(()) => { self.error = None; self.notice = Some("Saved settings".into()); }
-                        Err(e) => self.error = Some(format!("Save needs a new filename — {e}")),
-                    }
+                let named = !self.toml_path.trim().is_empty();
+                if ui.add_enabled(named, egui::Button::new("Load")).clicked() {
+                    self.load_profile();
+                }
+                if ui.add_enabled(named, egui::Button::new("Save")).clicked() {
+                    self.save_profile(None);
                 }
             });
+            if let Some(path) = self.replace_profile.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(AMBER, format!("Replace {}?", path.display()));
+                    if ui.button("Replace profile").clicked() {
+                        self.save_profile(Some(path));
+                    } else if ui.button("Cancel").clicked() {
+                        self.replace_profile = None;
+                    }
+                });
+            }
+            if let Some(session) = &self.session {
+                ui.small("Last setup saved automatically").on_hover_text(session.path.display().to_string());
+            }
             ui.horizontal(|ui| {
                 ui.label("EDS file");
                 ui.text_edit_singleline(&mut self.eds_path);
@@ -846,8 +971,16 @@ impl App {
                 if ui.button("Connect").clicked() {
                     self.connect();
                 }
-                ui.selectable_value(&mut self.schedule, Schedule::Deadline, "Deadline");
-                ui.selectable_value(&mut self.schedule, Schedule::Tokio, "Tokio baseline");
+                ui.selectable_value(
+                    &mut self.preferences.schedule,
+                    Schedule::Deadline,
+                    "Deadline",
+                );
+                ui.selectable_value(
+                    &mut self.preferences.schedule,
+                    Schedule::Tokio,
+                    "Tokio baseline",
+                );
             });
         }
         if let Some(e) = &self.error {
@@ -855,6 +988,13 @@ impl App {
         }
         if let Some(n) = &self.notice {
             ui.colored_label(CYAN, n);
+        }
+        if let Some(error) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.error.as_ref())
+        {
+            ui.colored_label(AMBER, error);
         }
     }
     fn select_profile(&mut self, i: Option<usize>) {
@@ -1093,14 +1233,18 @@ impl App {
         ui.add_enabled_ui(!self.capturing, |ui| {
             egui::Grid::new("capture").num_columns(2).show(ui, |ui| {
                 ui.label("Output directory");
-                ui.text_edit_singleline(&mut self.directory);
+                ui.text_edit_singleline(&mut self.preferences.directory);
                 ui.end_row();
-                number(ui, "Buffer samples", &mut self.capacity);
-                number(ui, "Rotate after bytes (0 = off)", &mut self.rotate_bytes);
+                number(ui, "Buffer samples", &mut self.preferences.capacity);
+                number(
+                    ui,
+                    "Rotate after bytes (0 = off)",
+                    &mut self.preferences.rotate_bytes,
+                );
                 number(
                     ui,
                     "Rotate after seconds (0 = off)",
-                    &mut self.rotate_seconds,
+                    &mut self.preferences.rotate_seconds,
                 );
             });
         });
@@ -1136,5 +1280,77 @@ impl App {
             }
             ui.small(s.prefix.display().to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temporary(name: &str) -> PathBuf {
+        let mut id = [0; 8];
+        getrandom::fill(&mut id).unwrap();
+        std::env::temp_dir().join(format!("eipmaster-{name}-{:016x}", u64::from_le_bytes(id)))
+    }
+
+    #[test]
+    fn restores_edits_and_eds_without_restoring_write_permission() {
+        let directory = temporary("session");
+        let path = directory.join("last-session.toml");
+        let expected = {
+            let mut app = App::new(None, Some(path.clone()));
+            app.profiles = eds::parse(include_str!("../samples/loopback.eds")).unwrap();
+            app.select_profile(Some(0));
+            app.settings.input_rpi_us = 8_000;
+            app.device = "in-progress address".into();
+            app.local = "127.0.0.2".into();
+            app.eds_path = "previous adapter.eds".into();
+            app.toml_path = "saved profile.toml".into();
+            app.preferences.rotate_seconds = 15;
+            app.preferences.schedule = Schedule::Tokio;
+            app.bench_confirmed = true;
+            app.writes_confirmed = true;
+            app.output_entries.push("uncommitted output".into());
+            app.session_snapshot()
+        };
+        let restored = App::new(None, Some(path.clone()));
+        assert_eq!(restored.session_snapshot(), expected);
+        assert!(!restored.bench_confirmed && !restored.writes_confirmed && !restored.capturing);
+        assert!(restored.connection.is_none() && restored.output_entries.is_empty());
+        drop(restored);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn named_profile_loads_preferences_and_requires_confirmation_to_replace() {
+        let directory = temporary("profiles");
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("profile.toml");
+        let mut app = App::new(None, Some(directory.join("last-session.toml")));
+        app.toml_path = path.display().to_string();
+        app.device = "127.0.0.2".into();
+        app.preferences.capacity = 200;
+        app.save_profile(None);
+        assert!(app.error.is_none());
+        let original = fs::read(&path).unwrap();
+        app.preferences.capacity = 800;
+        app.preferences.rotate_bytes = 4_096;
+        app.save_profile(None);
+        assert_eq!(app.replace_profile.as_deref(), Some(path.as_path()));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let confirmed = app.replace_profile.take();
+        app.save_profile(confirmed);
+        assert!(app.error.is_none());
+        app.device = "127.0.0.3".into();
+        app.preferences = Preferences::default();
+        app.load_profile();
+        assert!(app.error.is_none());
+        assert_eq!(app.device, "127.0.0.2");
+        assert_eq!(app.preferences.capacity, 800);
+        assert_eq!(app.preferences.rotate_bytes, 4_096);
+        app.session = None;
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 }

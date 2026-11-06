@@ -1,8 +1,9 @@
 use assembly_scanner::{
-    capture::{Capture, Options, Slot},
+    capture::{Capture, Slot},
     eds,
     model::Settings,
-    scanner::{Connection, Identity, IdentityKey, Spacing, read_identity},
+    scanner::{Connection, Identity, IdentityKey, Schedule, Spacing, read_identity},
+    settings_file,
 };
 use serde::Serialize;
 use std::{
@@ -23,7 +24,7 @@ Usage:
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
   eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product>
 
-Capture uses the deadline scheduler and requires an input-only profile.
+Capture requires an input-only profile. The scheduler defaults to deadline.
 The expected Identity Object values are decimal and checked before Forward_Open.
 Seconds must be an integer from 1 to 3600.";
 
@@ -131,7 +132,7 @@ struct EdsProfile {
     name: String,
     supported: bool,
     unsupported: Vec<String>,
-    fields: std::collections::BTreeMap<&'static str, String>,
+    fields: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -150,6 +151,7 @@ struct Report {
     input_size: u16,
     duration_seconds: u64,
     duration_reached: bool,
+    schedule: Schedule,
     requested_ot_us: u32,
     requested_to_us: u32,
     actual_ot_us: Option<u32>,
@@ -184,8 +186,8 @@ fn capture(
     seconds: u64,
     expected: IdentityKey,
 ) -> Result<bool, String> {
-    let text = fs::read_to_string(profile).map_err(|e| format!("{}: {e}", profile.display()))?;
-    let settings: Settings = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let (settings, preferences) = settings_file::load_profile(profile)?;
+    let preferences = preferences.unwrap_or_default();
     settings.validate()?;
     if !settings.input_only || settings.config_size != 0 || settings.output_run_idle {
         return Err("Capture requires an input-only heartbeat with zero configuration bytes and O->T Run/Idle disabled".into());
@@ -205,23 +207,22 @@ fn capture(
     let slot = Slot::default();
     let mut capture = Capture::start(
         &slot,
-        Options {
-            directory: PathBuf::from(directory),
-            capacity: 32_768,
-            rotate_bytes: 0,
-            rotate_seconds: 0,
-        },
+        preferences.capture_options(PathBuf::from(directory)),
         &settings,
     )
     .map_err(|e| e.to_string())?;
-    let connection =
-        match Connection::start_verified_input(settings.clone(), slot.clone(), expected) {
-            Ok(connection) => connection,
-            Err(error) => {
-                capture.stop(&slot);
-                return Err(error);
-            }
-        };
+    let connection = match Connection::start_verified_input_with_schedule(
+        settings.clone(),
+        slot.clone(),
+        expected,
+        preferences.schedule,
+    ) {
+        Ok(connection) => connection,
+        Err(error) => {
+            capture.stop(&slot);
+            return Err(error);
+        }
+    };
     let mut deadline = None;
     let mut duration_reached = false;
     while !connection.finished() {
@@ -262,6 +263,7 @@ fn capture(
         input_size: settings.input_size,
         duration_seconds: seconds,
         duration_reached,
+        schedule: preferences.schedule,
         requested_ot_us: settings.output_rpi_us,
         requested_to_us: settings.input_rpi_us,
         actual_ot_us,

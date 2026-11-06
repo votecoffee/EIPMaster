@@ -107,13 +107,16 @@ def main():
         assert list(map(int, row[6:])) == [expected, int.from_bytes(payload[:2], "big"), payload[3]]
 
     mapped = root / "mapped.toml"
-    mapped.write_text(test_profile(PROFILE.with_name("mapped-loopback.toml")), encoding="utf-8")
+    mapped.write_text(test_profile(PROFILE.with_name("mapped-loopback.toml"))
+                      + '\n[app]\ncapacity = 512\nrotate_seconds = 1\nschedule = "tokio"\n',
+                      encoding="utf-8")
     filtered, adapter = with_adapter(
         root, "on-change", [exe, "capture", mapped, root / "on-change", "3", "0:12:1"]
     )
     assert filtered.returncode == 0, (filtered.stdout, filtered.stderr)
     filtered_report = tomllib.loads(filtered.stdout)
     parts = parts_for(Path(filtered_report["csv_prefix"]))
+    assert filtered_report["schedule"] == "tokio" and len(parts) >= 2
     assert read_header(parts[0]) == METADATA + ["counter", "low_bit"]
     changed = list(rows(parts))
     assert len(changed) == filtered_report["written"] > 10 and adapter["forward_close"]

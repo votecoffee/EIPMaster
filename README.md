@@ -33,6 +33,12 @@ Launch the executable from the repository root so the sample paths resolve. For 
 .\target\release\assembly-scanner.exe
 ```
 
+### Save and restore settings
+
+The Windows GUI automatically remembers the last setup in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. It saves edited settings while the window is open and on a normal close. The session includes device and NIC settings, imported EDS profiles and overrides, assembly mappings, staged bytes, and CSV and scheduler preferences. The app starts offline. Confirm the bench and any output or configuration writes again before connecting.
+
+To keep a named setup, enter a TOML path in **Settings TOML** and select **Save**. Enter a new path to save a separate profile, or select **Replace profile** to update an existing file. Select **Load** to switch to a saved profile while disconnected and with capture stopped. Older profiles still load. The optional `[app]` table stores the capture directory, buffer capacity, rotation limits and scheduler.
+
 ### Connect to a bench adapter
 
 1. Enter the adapter IPv4 address and the local IPv4 address assigned to the scanner NIC. Choose **Read identity** to verify the target before opening I/O.
@@ -40,7 +46,7 @@ Launch the executable from the repository root so the sample paths resolve. For 
 3. For manual setup, choose **Manual settings** or load a TOML profile. Set the T→O input and O→T output or heartbeat connection points. Use payload sizes excluding transport headers, and confirm the sizes against the adapter. Enter each RPI in microseconds. Port zero requests an ephemeral local UDP port. Enter the selected NIC's fixed UDP port if the adapter requires it.
 4. Set the Run/Idle option for each direction. Standard Forward_Open allows up to 509 bytes of assembly payload and optional Run/Idle header per direction after the two-byte Class 1 sequence. Enter the optional configuration instance and its hex bytes when required. A configuration payload is applied in Forward_Open. Review the exact bytes before reconnecting to apply changes.
 5. Prefer a supported **Input-only heartbeat profile** for logging. An exclusive-owner connection can take control immediately and sends the staged bytes. An O→T Run/Idle header asserts Run from the first frame. Confirm ownership and the specific output or configuration bytes before checking the authorization box. On an authorized output connection, **Apply staged outputs** swaps the cyclic buffer.
-6. Under **Assembly mappings**, define named inputs and outputs. The right-hand **Input assembly** panel shows the live named values and the raw bytes. Save the mapping with the connection settings in a new TOML file.
+6. Under **Assembly mappings**, define named inputs and outputs. The right-hand **Input assembly** panel shows the live named values and the raw bytes. Save the mapping and connection settings in a named TOML profile.
 
 The initial protocol scope is standard Forward_Open, fixed-size cyclic Class 1 unicast and direct assembly paths. Routed paths, electronic keys, multicast, listen-only, and Large Forward_Open are outside that scope. Keep device-specific presets, vendor files and raw captures in the Git-ignored `.local/` folder. The tracked [sample EDS](samples/loopback.eds) and [sample TOML](samples/loopback.toml) target the localhost fixture.
 
@@ -87,7 +93,7 @@ The console executable uses the same EDS importer, scanner and CSV writer as the
 .\target\release\eipmaster-cli.exe capture samples\loopback.toml .\.local\console-capture 10 0:12:1
 ```
 
-Start `python tools/loopback_adapter.py .local/adapter.json` in another console before each localhost `identity` or `capture` example. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The deadline scheduler runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report includes the last accepted assembly payload in hex alongside its decoded value. It separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots, unchanged samples and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
+Start `python tools/loopback_adapter.py .local/adapter.json` in another console before each localhost `identity` or `capture` example. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The CLI uses the profile's buffer capacity, rotation limits and scheduler when present, and its explicit output directory argument takes precedence. Capture runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report includes the last accepted assembly payload in hex alongside its decoded value. It separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots, unchanged samples and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
 
 Use the capture prefix shown in the GUI to join the parts in order after stopping capture.
 

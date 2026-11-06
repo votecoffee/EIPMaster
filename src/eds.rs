@@ -1,12 +1,14 @@
 use crate::model::{Settings, hex};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
     pub name: String,
-    pub fields: BTreeMap<&'static str, String>,
+    pub fields: BTreeMap<String, String>,
     pub settings: Settings,
     pub unsupported: Vec<String>,
 }
@@ -185,9 +187,9 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
             }
             if trigger & 0x0200_0000 != 0 {
                 s.input_only = true;
-                origin.insert("Ownership", "Input-only".into());
+                origin.insert("Ownership".into(), "Input-only".into());
             } else if trigger & 0x0400_0000 != 0 {
-                origin.insert("Ownership", "Exclusive owner".into());
+                origin.insert("Ownership".into(), "Exclusive owner".into());
             } else {
                 issues.push("Profile lacks input-only or exclusive-owner support".into());
             }
@@ -215,14 +217,14 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 };
                 match format {
                     0 => {
-                        origin.insert(header_label, "Modeless".into());
+                        origin.insert(header_label.into(), "Modeless".into());
                     }
                     3 if shift == 0 && s.input_only => {
-                        origin.insert(header_label, "Heartbeat".into());
+                        origin.insert(header_label.into(), "Heartbeat".into());
                     }
                     4 => {
                         *header = true;
-                        origin.insert(header_label, "32-bit Run/Idle".into());
+                        origin.insert(header_label.into(), "32-bit Run/Idle".into());
                     }
                     _ => issues.push(format!(
                         "{direction} transfer format {format} needs manual review"
@@ -231,7 +233,7 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 let supported = (mask >> (24 + shift)) & 15;
                 if supported != 0 {
                     *priority = supported.trailing_zeros() as u8;
-                    origin.insert(priority_label, priority.to_string());
+                    origin.insert(priority_label.into(), priority.to_string());
                 } else {
                     issues.push(format!("{direction} priority missing"));
                 }
@@ -243,13 +245,16 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 s.output_instance = output;
                 s.input_instance = input;
                 origin.insert(
-                    "Config assembly",
+                    "Config assembly".into(),
                     config.map_or_else(|| "None".into(), |v| v.to_string()),
                 );
-                origin.insert("O->T assembly", output.to_string());
-                origin.insert("T->O assembly", input.to_string());
+                origin.insert("O->T assembly".into(), output.to_string());
+                origin.insert("T->O assembly".into(), input.to_string());
                 if get(14).contains('[') {
-                    origin.insert("Assembly path", format!("{} => {}", get(14), hex(&bytes)));
+                    origin.insert(
+                        "Assembly path".into(),
+                        format!("{} => {}", get(14), hex(&bytes)),
+                    );
                 }
             } else {
                 issues.push("Unresolved or unsupported assembly path".into());
@@ -261,7 +266,7 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
             ] {
                 if let Some(n) = resolve(get(idx)) {
                     *value = n;
-                    origin.insert(label, format!("{n} µs ({})", get(idx)));
+                    origin.insert(label.into(), format!("{n} µs ({})", get(idx)));
                 }
             }
             for (idx, label, value) in [
@@ -277,7 +282,7 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 if let Some(n) = size.and_then(|n| u16::try_from(n).ok()) {
                     *value = n;
                     origin.insert(
-                        label,
+                        label.into(),
                         format!(
                             "{n} bytes ({})",
                             if get(idx).is_empty() {
@@ -307,7 +312,7 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
             match (size1, size2) {
                 (Some(0), Some(n)) if n <= 490 => {
                     s.config_size = n as u16;
-                    origin.insert("Config size", n.to_string());
+                    origin.insert("Config size".into(), n.to_string());
                 }
                 _ => issues.push("Configuration format or size requires manual review".into()),
             }
