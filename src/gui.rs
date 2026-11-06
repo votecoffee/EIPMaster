@@ -1973,6 +1973,7 @@ mod tests {
         let capture = &report["capture"];
         assert_eq!(capture["mode"].as_str(), Some("on_change"));
         assert_eq!(capture["started_utc"].as_str(), Some(sink.start_utc()));
+        assert_eq!(capture["csv_parts"].as_integer(), Some(1));
         assert_eq!(capture["first_armed_generation"].as_integer(), Some(1));
         assert_eq!(capture["last_armed_generation"].as_integer(), Some(2));
         assert_eq!(capture["seen"].as_integer(), Some(3));

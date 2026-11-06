@@ -267,6 +267,8 @@ struct Report {
     last_value: Option<String>,
     last_input_hex: Option<String>,
     csv_prefix: String,
+    capture_start_utc: String,
+    csv_parts: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     field_summaries: Vec<FieldSummary>,
     identity_error: Option<String>,
@@ -554,6 +556,8 @@ fn capture(
             .map(ToString::to_string),
         last_input_hex: last_input.map(|run| assembly_scanner::model::hex(&run.input)),
         csv_prefix: sink.prefix.display().to_string(),
+        capture_start_utc: sink.start_utc().to_string(),
+        csv_parts: sink.part_count(),
         field_summaries: sink.field_summaries(),
         identity_error: status.identity_error.clone(),
         cip_error: status.cip_error.clone(),

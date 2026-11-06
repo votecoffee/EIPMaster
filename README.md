@@ -146,6 +146,15 @@ Use the capture prefix shown in the GUI to join the parts in order after stoppin
 python tools/join_capture.py 'captures/capture-<UTC-prefix>' joined.csv
 ```
 
+Use `--report` with a stopped capture's `capture.toml` or GUI `-report.toml`. For qualification, use the individual trial's capture report. Omit the output path to verify the parts without writing a joined file.
+
+```powershell
+python tools/join_capture.py 'captures/capture-<UTC-prefix>' --report captures/capture.toml
+python tools/join_capture.py 'captures/capture-<UTC-prefix>' joined.csv --report captures/capture.toml
+```
+
+Report checking compares the prefix name, written row count, and the saved start time, part count, and first and last field values when available. It counts logged connection generations and reconciles sample-index gaps with recorded buffer overruns. If verification fails, the command discards any partial join it created.
+
 Run the simulator using the real GUI and a timed CSV capture. Use a new output directory on each run.
 
 ```powershell

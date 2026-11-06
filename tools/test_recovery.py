@@ -1,15 +1,17 @@
 """Verify per-device recovery and disk failure isolation without opening a GUI."""
 import argparse
 from contextlib import contextmanager, ExitStack
+import csv
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
 import tomllib
 
-from join_capture import parts_for, rows
+from join_capture import METADATA, parts_for, read_header, rows
 
 HERE = Path(__file__).resolve().parent
 PROFILE = HERE.parent / "samples" / "loopback.toml"
@@ -91,6 +93,99 @@ def timestamp(row):
     return datetime.fromisoformat(row[0]) + timedelta(microseconds=int(row[1]))
 
 
+def join(prefix, *arguments):
+    return subprocess.run(
+        [sys.executable, HERE / "join_capture.py", prefix, *arguments],
+        capture_output=True, text=True, timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def check_report_join(root, recovered, parts, captured, disk):
+    root.mkdir()
+    prefix = Path(recovered["csv_prefix"])
+    report = prefix.parent / "capture.toml"
+    joined = root / "joined.csv"
+    checked = join(prefix, joined, "--report", report)
+    assert checked.returncode == 0, checked.stderr
+    assert "logged generation count 2" in checked.stdout
+    assert list(rows([joined])) == captured
+    assert recovered["csv_parts"] == len(parts)
+    assert recovered["capture_start_utc"] == captured[0][0]
+
+    moved = root / prefix.name
+    for part in parts[:-1]:
+        shutil.copyfile(part, root / part.name)
+    partial = join(moved, "--report", report)
+    assert partial.returncode == 1 and "CSV parts, found" in partial.stderr
+
+    legacy = root / "legacy.toml"
+    data = report.read_text(encoding="utf-8")
+    legacy.write_text("".join(line for line in data.splitlines(keepends=True)
+                              if not line.startswith(("csv_parts = ", "capture_start_utc = "))),
+                      encoding="utf-8")
+    assert join(prefix, "--report", legacy).returncode == 0
+    partial = join(moved, "--report", legacy)
+    assert partial.returncode == 1 and "written rows, found" in partial.stderr
+
+    moved_last = root / parts[-1].name
+    shutil.copyfile(parts[-1], moved_last)
+    assert join(moved, "--report", report).returncode == 0
+    header = read_header(parts[-1])
+    with moved_last.open("w", encoding="utf-8", newline="") as file:
+        csv.writer(file, lineterminator="\r\n").writerow(header)
+    bad_output = root / "truncated.csv"
+    partial = join(moved, bad_output, "--report", report)
+    assert partial.returncode == 1 and "written rows, found" in partial.stderr
+    assert not bad_output.exists()
+    edited = list(rows([parts[-1]]))
+    edited[-1][-1] += "0"
+    with moved_last.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file, lineterminator="\r\n")
+        writer.writerow(header)
+        writer.writerows(edited)
+    altered = join(moved, "--report", report)
+    assert altered.returncode == 1 and "Last CSV values differ" in altered.stderr
+
+    failed_prefix = Path(disk["csv_prefix"])
+    failed = join(failed_prefix, "--report", failed_prefix.parent / "capture.toml")
+    assert failed.returncode == 1 and "CSV writer error" in failed.stderr
+
+
+def check_gui_report_join(root):
+    prefix = root / "gui-capture"
+    started = "2026-01-01T00:00:00.000000Z"
+    saved = [
+        [started, "0", "0", "1", "1", "1", "a,\"b\n", "18446744073709551615"],
+        [started, "10", "2", "1", "3", "3", "", "000001"],
+        [started, "20", "3", "2", "1", "1", "new", "2"],
+    ]
+    for number, samples in enumerate([saved[:2], saved[2:]], 1):
+        path = prefix.with_name(f"{prefix.name}-{number:06}.csv")
+        with path.open("x", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file, lineterminator="\r\n")
+            writer.writerow(METADATA + ["text", "value"])
+            writer.writerows(samples)
+    body = (f'mode = "gui"\n[capture]\ncsv_prefix = {json.dumps(str(prefix), ensure_ascii=False)}\n'
+            f'started_utc = "{started}"\ncsv_parts = 2\nwritten = 3\nunchanged = 1\n')
+    report = root / "gui-run-report.toml"
+    report.write_text(body + "seen = 6\nbuffer_overruns = 2\n", encoding="utf-8")
+    joined = root / "gui-joined.csv"
+    checked = join(prefix, joined, "--report", report)
+    assert checked.returncode == 0, checked.stderr
+    assert "account for 1 of 2 reported overruns" in checked.stdout
+    assert "after the last saved row total 1" in checked.stdout
+    assert list(rows([joined])) == saved
+    old_join = root / "legacy-joined.csv"
+    assert join(prefix, old_join).returncode == 0 and list(rows([old_join])) == saved
+
+    wrong = root / "unexplained-gap.toml"
+    wrong.write_text(body + "seen = 4\nbuffer_overruns = 0\n", encoding="utf-8")
+    checked = join(prefix, "--report", wrong)
+    assert checked.returncode == 1 and "missing sample indexes" in checked.stderr
+    print("CSV report checks passed for reconnects, missing and truncated parts, and reported overruns")
+
+
 def concurrent(exe, root):
     with ExitStack() as stack:
         healthy_fixture = adapter(stack, root, "healthy", "127.0.0.1", "normal")
@@ -144,6 +239,7 @@ def concurrent(exe, root):
     assert timestamp(r[first_recovered]) - timestamp(r[first_recovered - 1]) >= timedelta(seconds=1)
     assert timestamp(h[0]) < min(timestamp(d[-1]), timestamp(r[first_recovered - 1]))
     assert timestamp(h[-1]) > max(timestamp(d[-1]), timestamp(r[first_recovered]))
+    check_report_join(root / "report-join", recovered, recovered_parts, r, disk)
     for name, report in (("healthy", healthy), ("recovered", recovered), ("disk", disk)):
         print(f"{name}: {report['written']} rows, {len(report['attempts'])} attempts, "
               f"{report['timeouts']} timeouts, {report['sequence_gaps']} gaps, "
@@ -177,6 +273,7 @@ def main():
     root.mkdir(parents=True)
     concurrent(args.exe.resolve(), root)
     replacement(args.exe.resolve(), root)
+    check_gui_report_join(root)
 
 
 if __name__ == "__main__":

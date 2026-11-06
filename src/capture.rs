@@ -50,6 +50,7 @@ pub struct Sink {
     next_index: AtomicU64,
     pub overrun: AtomicU64,
     pub written: AtomicU64,
+    parts: AtomicU64,
     pub error: Mutex<Option<String>>,
     field_summaries: Mutex<Vec<FieldSummary>>,
     pub prefix: PathBuf,
@@ -71,6 +72,10 @@ impl Sink {
 
     pub fn field_summaries(&self) -> Vec<FieldSummary> {
         self.field_summaries.lock().unwrap().clone()
+    }
+
+    pub fn part_count(&self) -> u64 {
+        self.parts.load(Relaxed)
     }
 
     pub fn record(
@@ -196,6 +201,7 @@ impl Capture {
             next_index: 0.into(),
             overrun: 0.into(),
             written: 0.into(),
+            parts: 1.into(),
             error: Mutex::new(None),
             field_summaries: Mutex::new(Vec::new()),
             prefix,
@@ -323,6 +329,7 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                 sink.written.store(committed, Relaxed);
                 number += 1;
                 part = Part::new(&sink.prefix, number, &sink.header)?;
+                sink.parts.store(number, Relaxed);
             }
             part.file.write_all(&line)?;
             part.first_us.get_or_insert(sample.elapsed);
@@ -411,6 +418,7 @@ mod tests {
             .collect();
         parts.sort();
         assert_eq!(parts.len(), 8);
+        assert_eq!(capture.sink.part_count(), 8);
         for (index, path) in parts.iter().enumerate() {
             let content = fs::read_to_string(path).unwrap();
             assert!(content.starts_with("capture_start_utc,elapsed_us,sample_index,connection_generation,packet_sequence,cip_sequence,first,second,third\r\n"));
@@ -552,6 +560,7 @@ mod tests {
         capture.stop(&slot);
         assert_eq!(capture.sink.seen.load(Relaxed), 2);
         assert_eq!(capture.sink.written.load(Relaxed), 1);
+        assert_eq!(capture.sink.part_count(), 1);
         assert_eq!(capture.sink.overrun.load(Relaxed), 0);
         assert!(capture.sink.error.lock().unwrap().is_some());
         assert!(capture.sink.field_summaries().is_empty());

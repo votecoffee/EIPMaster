@@ -284,6 +284,14 @@ A 60-second localhost run used a synthetic 32-byte input assembly with three sig
 
 Both directions requested 1,000 microseconds and Forward_Open returned 1,000 microseconds. The input rate was 980.1 packets per second with a receive p99 of 1,688 microseconds and a longest interval of 29,883 microseconds. There were zero sequence gaps, receive timeouts, or CSV overruns. The scanner skipped 905 scheduled sends and the fixture skipped 1,196. The run confirmed Forward_Close.
 
+## Report-checked CSV joins
+
+The headless recovery check joined a finalized capture across two connection generations and verified the saved rows against the capture report. Relocating the CSV parts preserved verification. Copies with a missing final part, missing rows in the final part, or an altered last value were rejected. An attempted join with missing rows left no partial output.
+
+A synthetic GUI report accounted for one visible sample-index gap and one overrun after the last saved row. The joined CSV preserved multiline text, empty cells, leading zeros, and the exact decimal text of a full-width unsigned value. A report with no recorded overrun rejected the same index gap. A run report containing a CSV writer error was rejected.
+
+The check also verified all 58,808 rows of an earlier six-part loopback capture using its original report. That report predated the part-count field and supplied the written row count and field summaries.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

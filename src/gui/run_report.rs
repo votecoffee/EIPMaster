@@ -75,6 +75,7 @@ struct RunReport<'a> {
 struct CaptureReport<'a> {
     started_utc: &'a str,
     csv_prefix: String,
+    csv_parts: u64,
     mode: CaptureMode,
     first_armed_generation: Option<u64>,
     last_armed_generation: Option<u64>,
@@ -158,6 +159,7 @@ impl Device {
             capture: CaptureReport {
                 started_utc: sink.start_utc(),
                 csv_prefix: sink.prefix.display().to_string(),
+                csv_parts: sink.part_count(),
                 mode: sink.mode(),
                 first_armed_generation: self.capture_run.first_generation,
                 last_armed_generation: self.capture_run.last_generation,
