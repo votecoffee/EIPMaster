@@ -60,7 +60,7 @@ All runs closed cleanly. The median per-run scanner send p99 changed from 1,535 
 - With requests of 1,000 / 1,000 µs, the fixture also returned different intervals of 1,250 / 1,500 µs for O→T / T→O. The app reported the returned values separately and used them for its cyclic timing.
 - A loopback-only exclusive-owner test checked the padded configuration segment, Run/Idle framing in each direction, and the transition between two staged output buffers. The reconnect test kept one CSV capture across two connections and verified the generation change with contiguous sample indexes.
 
-Machine-readable results are under `evidence/` in the release package.
+Historical simulator reports were bundled with the original development packages. The portable preview includes this summary and its build manifest. Device-specific captures stay outside the package.
 
 ## Physical bench acceptance
 

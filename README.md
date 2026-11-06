@@ -16,6 +16,19 @@ EIPMaster is the source repository for the Assembly Scanner desktop application.
 
 ## Install
 
+### Portable Windows x64 preview
+
+Extract the preview ZIP and follow the bundled [quick start](QUICKSTART.md). It includes the GUI, CLI, generic loopback examples, and license notices. Use its SHA-256 file to verify the download.
+
+To build the same package from a clean checkout matching `origin/main`, use Python 3.11 or newer and the toolchain below.
+
+```powershell
+git fetch origin
+python tools/package_windows.py .local/dist
+```
+
+The packager builds with locked dependencies and includes the commit, toolchain and file hashes. Use `--offline` with a populated Cargo cache. Use `--toolchain` to select the recorded Rust toolchain when repeating an older build.
+
 ### Dependencies
 
 Run the Windows x64 build on Windows with an OpenGL-capable graphics driver. Building from source requires the x64 MSVC Rust toolchain and Visual Studio C++ Build Tools. The loopback and CSV join tools use Python 3.11 or newer.
