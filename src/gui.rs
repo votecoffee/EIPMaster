@@ -2,6 +2,7 @@ use crate::{
     capture::{self, Capture},
     eds::{self, Profile},
     model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
+    preflight,
     scanner::{self, Connection, Identity, Schedule, Spacing, Status},
     settings_file::{self, Preferences, Session},
 };
@@ -768,7 +769,12 @@ impl App {
             if let Some(i) = self.selected {
                 let p = &self.profiles[i];
                 ui.collapsing("EDS source values and fields to review", |ui| {
-                    for (key, value) in &p.fields { ui.label(format!("{key} = {value}")); }
+                    for (key, value) in &p.fields {
+                        ui.label(format!("{key} = {value}"));
+                        if p.size_from_assembly_definition(key) {
+                            ui.colored_label(AMBER, "Assembly definition width. Verify the configured device payload.");
+                        }
+                    }
                     for key in ["O->T RPI", "T->O RPI", "T->O size"] {
                         if !p.fields.contains_key(key) { ui.colored_label(AMBER, format!("{key} needs input")); }
                     }
@@ -883,6 +889,9 @@ impl App {
                         self.output_entries.clear();
                     }
                 });
+            }
+            if !online && !self.capturing {
+                ui.collapsing("Offline profile check", |ui| self.show_preflight(ui));
             }
         });
         if online || self.capturing {
@@ -1010,6 +1019,69 @@ impl App {
             settings.capture_mode = self.settings.capture_mode;
             settings.local_udp_port = self.settings.local_udp_port;
             self.settings = settings;
+        }
+    }
+    fn show_preflight(&self, ui: &mut Ui) {
+        ui.small("Checks the configuration locally. Verify the adapter identity and payload on the bench.");
+        let settings = match self.current() {
+            Ok(settings) => settings,
+            Err(error) => {
+                ui.colored_label(RED, error);
+                return;
+            }
+        };
+        let profile = self.selected.map(|i| &self.profiles[i]);
+        let report = preflight::inspect(&settings, &self.preferences, profile);
+        if report.connection_valid {
+            ui.colored_label(CYAN, "Connection settings valid");
+        }
+        for error in &report.connection_errors {
+            ui.colored_label(RED, error);
+        }
+        if report.capture_config_valid {
+            ui.colored_label(CYAN, "Capture settings valid");
+        }
+        for error in &report.capture_errors {
+            ui.colored_label(AMBER, error);
+        }
+        for (label, direction) in [
+            ("T->O input", &report.input),
+            ("O->T output", &report.output),
+        ] {
+            ui.label(format!(
+                "{label} · Assembly {} · {} bytes · {} µs requested",
+                direction.assembly, direction.payload_bytes, direction.requested_rpi_us
+            ));
+        }
+        if report.requests_output_ownership {
+            ui.colored_label(AMBER, "Connecting requests output ownership");
+        }
+        if report.asserts_run {
+            ui.colored_label(AMBER, "Connecting asserts Run in the O->T header");
+        }
+        if report.configuration_bytes != 0 {
+            ui.colored_label(
+                AMBER,
+                format!(
+                    "Connecting sends {} configuration bytes",
+                    report.configuration_bytes
+                ),
+            );
+        }
+        if !report.origins.is_empty() {
+            egui::Grid::new("preflight-origins")
+                .striped(true)
+                .show(ui, |ui| {
+                    for origin in report.origins {
+                        ui.label(origin.field);
+                        ui.monospace(origin.effective);
+                        let response = ui.label(origin.state.label());
+                        if let Some(value) = origin.eds {
+                            response.on_hover_text(value);
+                        }
+                        ui.end_row();
+                    }
+                });
         }
     }
     fn typed_outputs(&mut self, ui: &mut Ui) {

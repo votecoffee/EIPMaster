@@ -47,6 +47,18 @@ def main():
     [profile] = tomllib.loads(imported.stdout)["profiles"]
     assert profile["supported"] and profile["id"] == "Connection1"
     assert profile["fields"]["T->O size"] == "4 bytes (Assem101)"
+    assert profile["assembly_definition_sizes"] == ["T->O size"]
+
+    validate = [exe, "validate", PROFILE]
+    checked = subprocess.run([*validate, PROFILE.with_suffix(".eds"), "Connection1"],
+                             capture_output=True, text=True, timeout=5)
+    assert checked.returncode == 0, checked.stderr
+    preflight = tomllib.loads(checked.stdout)
+    assert preflight["connection_valid"] and preflight["capture_config_valid"]
+    assert not preflight["requests_output_ownership"] and preflight["configuration_bytes"] == 0
+    fields = {item["field"]: item for item in preflight["origins"]}
+    assert fields["T->O size"]["state"] == "assembly_definition"
+    assert fields["T->O size"]["eds_size_is_layout"]
 
     identity, adapter = with_adapter(root, "identity", [exe, "identity", "127.0.0.1", "127.0.0.1"])
     assert identity.returncode == 0, identity.stderr
@@ -58,6 +70,21 @@ def main():
 
     legacy = root / "legacy.toml"
     legacy.write_text(test_profile(PROFILE), encoding="utf-8")
+    size_override = root / "size-override.toml"
+    size_override.write_text(test_profile(PROFILE).replace("input_size = 4", "input_size = 8"), encoding="utf-8")
+    checked = subprocess.run([exe, "validate", size_override, PROFILE.with_suffix(".eds"), "Connection1"],
+                             capture_output=True, text=True, timeout=5)
+    assert checked.returncode == 0, checked.stderr
+    fields = {item["field"]: item for item in tomllib.loads(checked.stdout)["origins"]}
+    assert fields["T->O size"]["state"] == "override"
+    assert fields["T->O size"]["effective"] == "8" and fields["T->O size"]["eds_size_is_layout"]
+
+    unsupported_eds = root / "unsupported.eds"
+    unsupported_eds.write_text(PROFILE.with_suffix(".eds").read_text(encoding="utf-8")
+                               .replace("0x22440305", "0x44244305"), encoding="utf-8")
+    blocked = subprocess.run([*validate, unsupported_eds, "Connection1"],
+                             capture_output=True, text=True, timeout=5)
+    assert blocked.returncode == 1 and not tomllib.loads(blocked.stdout)["connection_valid"]
     capture = [exe, "capture", legacy]
     mismatch, adapter = with_adapter(root, "mismatch", [*capture, root / "mismatch", "1", "0:12:99"])
     assert mismatch.returncode == 1
@@ -139,11 +166,13 @@ def main():
 
     unsafe = root / "output-owner.toml"
     unsafe.write_text(PROFILE.read_text(encoding="utf-8").replace("input_only = true", "input_only = false"), encoding="utf-8")
+    owner_check = subprocess.run([exe, "validate", unsafe], capture_output=True, text=True, timeout=5)
+    assert owner_check.returncode == 0 and tomllib.loads(owner_check.stdout)["requests_output_ownership"]
     reject = subprocess.run([exe, "capture", unsafe, root / "unsafe", "1", "0:12:1"],
                             capture_output=True, text=True, timeout=5)
     assert reject.returncode == 1 and "input-only" in reject.stderr
     assert not (root / "unsafe").exists()
-    print(f"CLI verified: EDS, identity, mismatch rejected, {len(samples)} legacy rows, "
+    print(f"CLI verified: EDS, offline preflight, identity, mismatch rejected, {len(samples)} legacy rows, "
           f"{len(multi_samples)} multi-field rows, {len(changed)} change rows, unsafe profile rejected.")
 
 

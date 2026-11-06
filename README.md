@@ -49,6 +49,8 @@ To keep a named setup, enter a TOML path in **Settings TOML** and select **Save*
 5. Prefer a supported **Input-only heartbeat profile** for logging. An exclusive-owner connection can take control immediately and sends the staged bytes. An O→T Run/Idle header asserts Run from the first frame. Confirm ownership and the specific output or configuration bytes before checking the authorization box. On an authorized output connection, **Apply staged outputs** swaps the cyclic buffer.
 6. Under **Assembly mappings**, define named inputs and outputs. The right-hand **Input assembly** panel shows the live named values and the raw bytes. Save the mapping and connection settings in a named TOML profile.
 
+Open **Offline profile check** to review the effective assemblies, requested intervals, validation errors, and whether connecting would request output ownership, assert Run, or send configuration bytes. For a selected EDS profile, the check labels imported values, overrides, and manual entries. A size taken from an EDS assembly definition is a layout width. Verify the actual payload configured on the device before connecting.
+
 The initial protocol scope is standard Forward_Open, fixed-size cyclic Class 1 unicast and direct assembly paths. Routed paths, electronic keys, multicast, listen-only, and Large Forward_Open are outside that scope. Keep device-specific presets, vendor files and raw captures in the Git-ignored `.local/` folder. The tracked [sample EDS](samples/loopback.eds) and [sample TOML](samples/loopback.toml) target the localhost fixture.
 
 ### Map assembly values
@@ -86,10 +88,11 @@ The live panel separates requested RPIs, Forward_Open actual intervals and socke
 
 ### CLI
 
-The console executable uses the same EDS importer, scanner and CSV writer as the GUI. `eds` lists imported profiles, resolved settings and unsupported features offline. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.
+The console executable uses the same EDS importer, scanner and CSV writer as the GUI. `eds` lists imported profiles, resolved settings, assembly definition widths, and unsupported features offline. `validate` checks a TOML profile offline and optionally compares it to one EDS connection profile. It reports connection validity and capture configuration separately. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.
 
 ```powershell
 .\target\release\eipmaster-cli.exe eds samples\loopback.eds
+.\target\release\eipmaster-cli.exe validate samples\loopback.toml samples\loopback.eds Connection1
 .\target\release\eipmaster-cli.exe identity 127.0.0.1 127.0.0.1
 .\target\release\eipmaster-cli.exe capture samples\loopback.toml .\.local\console-capture 10 0:12:1
 ```

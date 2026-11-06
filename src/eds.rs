@@ -11,6 +11,32 @@ pub struct Profile {
     pub fields: BTreeMap<String, String>,
     pub settings: Settings,
     pub unsupported: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    assembly_definition_sizes: Vec<String>,
+}
+
+impl Profile {
+    pub fn size_from_assembly_definition(&self, field: &str) -> bool {
+        if self
+            .assembly_definition_sizes
+            .iter()
+            .any(|name| name == field)
+        {
+            return true;
+        }
+        // Older saved GUI sessions contain the source text but lack the structured marker.
+        matches!(field, "O->T size" | "T->O size")
+            && self
+                .fields
+                .get(field)
+                .and_then(|source| source.rsplit_once(" ("))
+                .and_then(|(_, name)| name.strip_suffix(')'))
+                .is_some_and(|name| {
+                    name.to_ascii_lowercase()
+                        .strip_prefix("assem")
+                        .is_some_and(|suffix| suffix.parse::<u16>().is_ok())
+                })
+    }
 }
 
 pub fn load(path: &Path) -> Result<Vec<Profile>, String> {
@@ -166,6 +192,7 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 name,
                 fields: BTreeMap::new(),
                 unsupported: Vec::new(),
+                assembly_definition_sizes: Vec::new(),
                 settings: Settings {
                     input_instance: 0,
                     output_instance: 0,
@@ -281,6 +308,9 @@ pub fn parse(text: &str) -> Result<Vec<Profile>, String> {
                 });
                 if let Some(n) = size.and_then(|n| u16::try_from(n).ok()) {
                     *value = n;
+                    if get(idx).is_empty() {
+                        p.assembly_definition_sizes.push(label.into());
+                    }
                     origin.insert(
                         label.into(),
                         format!(
@@ -332,6 +362,11 @@ mod tests {
         let p = &profiles[0];
         assert!(p.unsupported.is_empty(), "{:?}", p.unsupported);
         assert!(p.settings.input_only);
+        assert!(p.size_from_assembly_definition("T->O size"));
+        assert!(!p.size_from_assembly_definition("O->T size"));
+        let mut legacy = p.clone();
+        legacy.assembly_definition_sizes.clear();
+        assert!(legacy.size_from_assembly_definition("T->O size"));
         assert_eq!(
             (
                 p.settings.input_instance,

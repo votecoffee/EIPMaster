@@ -2,6 +2,7 @@ use assembly_scanner::{
     capture::{Capture, Slot},
     eds,
     model::Settings,
+    preflight,
     scanner::{Connection, Identity, IdentityKey, Schedule, Spacing, read_identity},
     settings_file,
 };
@@ -21,6 +22,7 @@ use std::{
 const USAGE: &str = "\
 Usage:
   eipmaster-cli eds <vendor.eds>
+  eipmaster-cli validate <settings.toml> [<vendor.eds> <ConnectionN>]
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
   eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product>
 
@@ -45,12 +47,19 @@ fn run(args: &[OsString]) -> Result<bool, String> {
             let result = EdsReport {
                 profiles: eds::load(Path::new(path))?
                     .into_iter()
-                    .map(|p| EdsProfile {
-                        id: p.id,
-                        name: p.name,
-                        supported: p.unsupported.is_empty(),
-                        unsupported: p.unsupported,
-                        fields: p.fields,
+                    .map(|p| {
+                        let assembly_definition_sizes = ["O->T size", "T->O size"]
+                            .into_iter()
+                            .filter(|field| p.size_from_assembly_definition(field))
+                            .collect();
+                        EdsProfile {
+                            id: p.id,
+                            name: p.name,
+                            supported: p.unsupported.is_empty(),
+                            unsupported: p.unsupported,
+                            assembly_definition_sizes,
+                            fields: p.fields,
+                        }
                     })
                     .collect(),
             };
@@ -59,6 +68,29 @@ fn run(args: &[OsString]) -> Result<bool, String> {
                 toml::to_string_pretty(&result).map_err(|e| e.to_string())?
             );
             Ok(true)
+        }
+        [command, path, comparison @ ..] if command == "validate" => {
+            let (settings, preferences) = settings_file::load_profile(Path::new(path))?;
+            let profile = match comparison {
+                [] => None,
+                [eds_path, id] => Some(
+                    eds::load(Path::new(eds_path))?
+                        .into_iter()
+                        .find(|profile| profile.id.eq_ignore_ascii_case(&id.to_string_lossy()))
+                        .ok_or_else(|| format!("EDS profile {:?} was not found", id))?,
+                ),
+                _ => return Err(USAGE.into()),
+            };
+            let report = preflight::inspect(
+                &settings,
+                &preferences.unwrap_or_default(),
+                profile.as_ref(),
+            );
+            print!(
+                "{}",
+                toml::to_string_pretty(&report).map_err(|e| e.to_string())?
+            );
+            Ok(report.connection_valid)
         }
         [command, adapter, local] if command == "identity" => {
             let settings = Settings {
@@ -132,6 +164,7 @@ struct EdsProfile {
     name: String,
     supported: bool,
     unsupported: Vec<String>,
+    assembly_definition_sizes: Vec<&'static str>,
     fields: std::collections::BTreeMap<String, String>,
 }
 
