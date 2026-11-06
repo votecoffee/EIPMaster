@@ -4,8 +4,8 @@ use assembly_scanner::{
     model::Settings,
     preflight,
     scanner::{
-        Connection, Identity, IdentityKey, IdentityPin, ReceiveTimeout, Reconnect, Schedule,
-        SendTiming, Spacing, Status, read_identity,
+        CloseOutcome, Connection, Identity, IdentityKey, IdentityPin, ReceiveTimeout, Reconnect,
+        Schedule, SendTiming, Spacing, Status, read_identity,
     },
     settings_file::{self, Preferences},
 };
@@ -257,6 +257,7 @@ struct Report {
     invalid: u64,
     timeouts: u64,
     receive_timeout: Option<ReceiveTimeout>,
+    forward_close: Option<CloseOutcome>,
     sent: u64,
     skipped_deadlines: u64,
     seen: u64,
@@ -285,6 +286,10 @@ impl Report {
             .last()
             .map_or(self.accepted, |attempt| attempt.accepted);
         self.state == "Closed"
+            && self
+                .forward_close
+                .as_ref()
+                .is_some_and(CloseOutcome::is_confirmed)
             && self.duration_reached
             && !self.interrupted
             && final_accepted != 0
@@ -304,6 +309,7 @@ struct AttemptReport {
     sequence_gaps: u64,
     timeouts: u64,
     receive_timeout: Option<ReceiveTimeout>,
+    forward_close: Option<CloseOutcome>,
     identity_error: Option<String>,
     cip_error: Option<String>,
     network_error: Option<String>,
@@ -353,6 +359,7 @@ impl Attempt {
             sequence_gaps: status.gaps,
             timeouts: status.timeouts,
             receive_timeout: status.receive_timeout,
+            forward_close: status.forward_close.clone(),
             identity_error: status.identity_error.clone(),
             cip_error: status.cip_error.clone(),
             network_error: status.network_error.clone(),
@@ -534,6 +541,7 @@ fn capture(
         invalid: sum(|run| run.status.invalid),
         timeouts: sum(|run| run.status.timeouts),
         receive_timeout: status.receive_timeout,
+        forward_close: status.forward_close.clone(),
         sent: sum(|run| run.sent),
         skipped_deadlines: sum(|run| run.skipped),
         seen: sink.seen.load(Relaxed),

@@ -1,7 +1,7 @@
 use super::Device;
 use crate::{
     model::CaptureMode,
-    scanner::{Identity, ReceiveTimeout, Schedule, SendTiming, Spacing},
+    scanner::{CloseOutcome, Identity, ReceiveTimeout, Schedule, SendTiming, Spacing},
     settings_file,
 };
 use chrono::{SecondsFormat, Utc};
@@ -52,6 +52,7 @@ struct ConnectionReport {
     invalid: u64,
     timeouts: u64,
     receive_timeout: Option<ReceiveTimeout>,
+    forward_close: Option<CloseOutcome>,
     sent: u64,
     skipped_deadlines: u64,
     receive_spacing: Spacing,
@@ -125,6 +126,7 @@ impl Device {
             invalid: status.invalid,
             timeouts: status.timeouts,
             receive_timeout: status.receive_timeout,
+            forward_close: status.forward_close.clone(),
             sent: self.tx,
             skipped_deadlines: self.skipped,
             receive_spacing: status.spacing,

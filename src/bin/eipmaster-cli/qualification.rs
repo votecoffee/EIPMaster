@@ -63,6 +63,11 @@ fn trial_errors(report: &Report, requested_us: u32) -> Vec<String> {
     } else if !report.completed() {
         errors.push("Capture did not complete cleanly".into());
     }
+    if let Some(close) = &report.forward_close
+        && !close.is_confirmed()
+    {
+        errors.push(format!("Forward_Close {close}"));
+    }
     if !intervals_match(report, requested_us) {
         errors
             .push("Forward_Open intervals differ from the requested RPI or are unavailable".into());
@@ -193,6 +198,10 @@ pub(super) fn run(
                 let stop = report.interrupted
                     || report.identity_error.is_some()
                     || report.disk_error.is_some()
+                    || report
+                        .forward_close
+                        .as_ref()
+                        .is_some_and(|close| !close.is_confirmed())
                     || (index == 0
                         && !(report.completed() && intervals_match(&report, BASELINE_US)));
                 trial.capture = Some(report);

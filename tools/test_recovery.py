@@ -112,6 +112,7 @@ def concurrent(exe, root):
     assert len(healthy["attempts"]) == len(disk["attempts"]) == 1
     prior, restored = recovered["attempts"]
     assert (prior["state"], restored["state"]) == ("Timed out", "Closed")
+    assert prior["forward_close"] == restored["forward_close"] == {"outcome": "confirmed"}
     assert (prior["generation"], restored["generation"]) == (1, 2)
     timeout = prior["receive_timeout"]
     assert not timeout["waiting_for_first_input"]

@@ -112,6 +112,7 @@ def interrupted_capture(kernel, exe, root, profile, case, command, event, fixtur
     assert result == tomllib.loads((capture / "capture.toml").read_text(encoding="utf-8"))
     assert result["interrupted"] and not result["duration_reached"]
     assert result["state"] == ("Timed out" if fixture_mode == "stall" else "Closed")
+    assert result["forward_close"] == {"outcome": "confirmed"}
     assert result["written"] == result["seen"] == result["accepted"] > 0
     assert result["buffer_overruns"] == 0 and "disk_error" not in result
     if fixture_mode == "stall":

@@ -136,6 +136,7 @@ def serve(tcp, udp, mode, report, serial_delta=0):
     stop = threading.Event()
     io = None
     owner = mode == "owner"
+    udp_mode = "stall" if mode == "stall-close-reject" else mode
     adapter_ip = tcp.getsockname()[0]
     scanner_ip = tcp.getpeername()[0]
     adapter_index = int(IPv4Address(adapter_ip)) - int(IPv4Address(IP))
@@ -189,14 +190,24 @@ def serve(tcp, udp, mode, report, serial_delta=0):
                         response = rr_reply(b"\xD4\0\0\0" + reply,
                                             (0x8000, sockaddr(adapter_ip, udp.getsockname()[1])))
                         io = threading.Thread(target=udp_loop,
-                                              args=(udp, (scanner_ip, port), to, to_api, mode, value_base, stop, report))
+                                              args=(udp, (scanner_ip, port), to, to_api, udp_mode, value_base, stop, report))
                         io.start()
                 elif service == 0x4E and object_class == 6:
                     assert struct.unpack_from("<HHI", body, 2) == (serial, vendor, origin)
                     assert body[12:] == path
                     report["forward_close"] = True
                     stop.set()
-                    response = rr_reply(b"\xCE\0\0\0" + body[2:10] + b"\0\0")
+                    if mode == "close-eof":
+                        break
+                    if mode in ("close-reject", "stall-close-reject"):
+                        response = rr_reply(bytes.fromhex("CE 00 01 01 07 01") + body[2:10] + b"\0\0")
+                    elif mode == "close-mismatch":
+                        wrong_ids = struct.pack("<H", serial ^ 1) + body[4:10]
+                        response = rr_reply(b"\xCE\0\0\0" + wrong_ids + b"\0\0")
+                    elif mode == "close-short":
+                        response = rr_reply(b"\xCE\0\0\0")
+                    else:
+                        response = rr_reply(b"\xCE\0\0\0" + body[2:10] + b"\0\0")
                 else:
                     raise AssertionError(f"Unexpected CIP request {service:#x}/{object_class:#x}")
             else:
@@ -214,7 +225,8 @@ def main():
     parser.add_argument("--mode", default="normal", choices=(
         "normal", "faults", "stall", "no-input", "invalid-input", "reject", "different-api", "owner",
         "reconnect", "recover", "replacement", "qualify", "qualify-different-api",
-        "qualify-replacement",
+        "qualify-replacement", "close-reject", "close-mismatch", "close-short", "close-eof",
+        "stall-close-reject", "qualify-close-reject",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
@@ -234,6 +246,7 @@ def main():
             "qualify": ("normal", "normal", "normal", "normal"),
             "qualify-replacement": ("normal", "normal"),
             "qualify-different-api": ("normal", "different-api", "normal", "normal"),
+            "qualify-close-reject": ("normal", "close-reject"),
         }
         modes = sequences.get(args.mode, (args.mode,))
         record_attempts = len(modes) > 1 and args.mode != "reconnect"

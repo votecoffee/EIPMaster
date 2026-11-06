@@ -3,7 +3,8 @@ use crate::{
     model::{self, Settings, Value},
 };
 use ethernetip_connections::forward_open::{
-    ForwardCloseRequest, ForwardOpenRequest, ForwardOpenResponse, NetworkConnectionParameters,
+    ForwardCloseRequest, ForwardCloseResponse, ForwardOpenRequest, ForwardOpenResponse,
+    NetworkConnectionParameters,
 };
 use ethernetip_core::{
     cip::ReplyHeader,
@@ -13,6 +14,7 @@ use ethernetip_core::{
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
+    fmt,
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{
@@ -238,6 +240,44 @@ pub struct ReceiveTimeout {
     pub last_sequence: Option<u32>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CloseOutcome {
+    Confirmed,
+    Rejected {
+        general_status: u8,
+        extended_status: Vec<u16>,
+    },
+    Unconfirmed {
+        error: String,
+    },
+}
+
+impl CloseOutcome {
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+}
+
+impl fmt::Display for CloseOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Confirmed => f.write_str("confirmed"),
+            Self::Rejected {
+                general_status,
+                extended_status,
+            } => {
+                write!(f, "rejected (CIP general 0x{general_status:02X}")?;
+                for word in extended_status {
+                    write!(f, ", extended 0x{word:04X}")?;
+                }
+                f.write_str(")")
+            }
+            Self::Unconfirmed { error } => write!(f, "unconfirmed ({error})"),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Status {
     pub state: &'static str,
@@ -257,6 +297,7 @@ pub struct Status {
     pub invalid: u64,
     pub timeouts: u64,
     pub receive_timeout: Option<ReceiveTimeout>,
+    pub forward_close: Option<CloseOutcome>,
     pub retryable: bool,
     pub spacing: Spacing,
 }
@@ -399,7 +440,10 @@ impl Connection {
                         other => status.network_error = Some(other.to_string()),
                     }
                 } else if status.state != "Timed out" {
-                    status.state = "Closed";
+                    status.state = match &status.forward_close {
+                        Some(close) if !close.is_confirmed() => "Close unconfirmed",
+                        _ => "Closed",
+                    };
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -526,6 +570,18 @@ impl Session {
             });
         }
         Ok((item.data[header.body_offset..].to_vec(), envelope))
+    }
+
+    fn forward_close(&mut self, request: &ForwardCloseRequest) -> Result<()> {
+        let (body, _) = self.cip(0x4e, 6, &request.encode(), None)?;
+        let reply = ForwardCloseResponse::decode(&body)?;
+        if reply.connection_serial != request.connection_serial
+            || reply.originator_vendor != request.originator_vendor
+            || reply.originator_serial != request.originator_serial
+        {
+            return Err(protocol("Mismatched Forward_Close connection identifiers"));
+        }
+        Ok(())
     }
 }
 impl Drop for Session {
@@ -716,10 +772,25 @@ fn run(
             result.and(tx)
         })
     })();
-    let close_result = session.cip(0x4e, 6, &close.encode(), None);
-    io_result?;
-    close_result?;
-    Ok(())
+    let close_result = session.forward_close(&close);
+    let mut status = shared.status.lock().unwrap();
+    // A watchdog timeout remains the primary result. Preserve the existing
+    // retry policy for explicit rejections and transport failures at close.
+    status.retryable &= close_result
+        .as_ref()
+        .err()
+        .is_none_or(|error| matches!(error, EipError::Io(_)));
+    status.forward_close = Some(match close_result {
+        Ok(()) => CloseOutcome::Confirmed,
+        Err(EipError::Cip { status, ext }) => CloseOutcome::Rejected {
+            general_status: status,
+            extended_status: ext,
+        },
+        Err(error) => CloseOutcome::Unconfirmed {
+            error: error.to_string(),
+        },
+    });
+    io_result
 }
 
 fn request_above_normal() -> bool {

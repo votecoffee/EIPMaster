@@ -54,6 +54,34 @@ def check_spacing(capture, samples):
         assert bool(send[key]) == (send["max_us"] >= multiple * capture["actual_ot_us"])
 
 
+def check_close_failures(capture_command, root):
+    for mode in ("close-reject", "close-mismatch", "close-short", "close-eof", "stall-close-reject"):
+        out = root / mode
+        stalled = mode.startswith("stall-")
+        result, adapter = with_adapter(root, mode, [*capture_command, out, "2", "0:12:1"], mode)
+        assert result.returncode == 1 and adapter["forward_close"]
+        report = tomllib.loads(result.stdout)
+        assert report == tomllib.loads((out / "capture.toml").read_text(encoding="utf-8"))
+        assert report["state"] == ("Timed out" if stalled else "Close unconfirmed")
+        assert report["duration_reached"] == (not stalled)
+        assert report["timeouts"] == int(stalled)
+        assert ("receive_timeout" in report) == stalled
+        assert "cip_error" not in report and "network_error" not in report
+        close = report["forward_close"]
+        if mode.endswith("reject"):
+            assert close == {"outcome": "rejected", "general_status": 1, "extended_status": [0x0107]}
+        else:
+            assert close["outcome"] == "unconfirmed" and close["error"]
+            if mode == "close-mismatch":
+                assert "Mismatched Forward_Close connection identifiers" in close["error"]
+            if mode == "close-short":
+                assert "short reply" in close["error"]
+        parts = parts_for(Path(report["csv_prefix"]))
+        samples = list(rows(parts))
+        assert len(samples) == report["written"] == report["accepted"] > 0
+    print("Forward_Close checks: rejection, mismatched IDs, short reply, missing reply, and watchdog preserved")
+
+
 def check_qualification(exe, root):
     profile = root / "source.toml"
     source = ('capture_mode = "on_change"\n' + PROFILE.read_text(encoding="utf-8")
@@ -91,6 +119,7 @@ def check_qualification(exe, root):
             assert capture["requested_ot_us"] == capture["requested_to_us"] == rpi
             assert adapter["ot_requested_us"] == adapter["to_requested_us"] == rpi
             assert capture["state"] == "Closed" and capture["duration_reached"]
+            assert capture["forward_close"] == {"outcome": "confirmed"}
             assert capture["written"] == capture["accepted"] == capture["seen"] > 50
             assert capture["unchanged"] == 0 and "attempts" not in capture
             parts = parts_for(Path(capture["csv_prefix"]))
@@ -144,6 +173,21 @@ def check_qualification(exe, root):
     assert adapter["forward_close"] and any("Forward_Open intervals differ" in error
                                             for error in receipt["runs"][0]["errors"])
 
+    out = root / "target-close-rejected"
+    result, fixture = with_adapter(
+        root, "target-close-rejected", [*command, out, "loopback", f"0:12:1:{serial}", "1"],
+        "qualify-close-reject",
+    )
+    receipt = tomllib.loads(result.stdout)
+    assert result.returncode == 1 and receipt["outcome"] == "failed"
+    assert [run["name"] for run in receipt["runs"]] == ["baseline-8ms", "trial-1"]
+    assert not (out / "trial-2").exists()
+    assert all(attempt["forward_close"] for attempt in fixture["attempts"])
+    target = receipt["runs"][1]
+    assert any("Forward_Close rejected" in error for error in target["errors"])
+    assert target["capture"]["forward_close"]["extended_status"] == [0x0107]
+    assert target["capture"]["accepted"] == target["capture"]["written"] > 0
+
     for name, args, expected_error in [
         ("wrong-path", ["direct", f"0:12:1:{serial}"], "non-loopback addresses"),
         ("missing-serial", ["loopback", "0:12:1", "1"], "requires decimal vendor:type:product:serial"),
@@ -160,7 +204,7 @@ def check_qualification(exe, root):
                             capture_output=True, text=True, timeout=5, creationflags=NO_WINDOW)
     assert result.returncode == 1 and "zero configuration bytes" in result.stderr and not out.exists()
     assert profile.read_text(encoding="utf-8") == source
-    print("Qualification rejects serial changes, baseline interval mismatches, link labels, and writes")
+    print("Qualification stops after an unconfirmed close and rejects serial changes, interval mismatches, link labels, and writes")
 
 
 def main():
@@ -227,6 +271,7 @@ def main():
     assert "Identity mismatch" in tomllib.loads(mismatch.stdout)["identity_error"]
     assert "ot_requested_us" not in adapter
     assert "last_input_hex" not in tomllib.loads(mismatch.stdout)
+    assert "forward_close" not in tomllib.loads(mismatch.stdout)
 
     for mode in ("no-input", "invalid-input"):
         no_input, adapter = with_adapter(
@@ -258,12 +303,14 @@ def main():
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
     assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
+    assert report["forward_close"] == {"outcome": "confirmed"}
     assert report["actual_ot_us"] == report["actual_to_us"] == args.rpi_us
     check_spacing(report, samples)
     timing = report["send_timing"]
     assert "above_normal_applied" not in timing
     assert timing["max_dispatch_lateness_us"] >= (args.rpi_us if report["skipped_deadlines"] else 0)
     assert timing["max_send_call_us"] >= (args.rpi_us if timing["send_calls_at_or_over_rpi"] else 0)
+    check_close_failures(capture, root)
 
     if sys.platform == "win32":
         priority = root / "priority.toml"

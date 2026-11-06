@@ -95,6 +95,7 @@ def call(cli, root, label, *args, timeout=10):
 
 def check_capture(report, seconds):
     assert report["state"] == "Closed" and report["duration_reached"]
+    assert report["forward_close"] == {"outcome": "confirmed"}
     assert report["input_assembly"] == 100 and report["input_size"] == 32
     assert report["last_input_hex"] == bytes(range(32)).hex(" ").upper()
     assert all(report[key] == 30000 for key in (

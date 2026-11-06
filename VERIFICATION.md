@@ -245,6 +245,22 @@ python tools/loopback_adapter.py .local/report-adapter.json --mode different-api
 cargo test --locked --release --bin assembly-scanner run_report_uses_the_final_loopback_connection -- --ignored
 ```
 
+## Forward_Close confirmation
+
+The scanner checks the connection serial number, originator vendor ID, and originator serial number in a successful Forward_Close reply. The run reports distinguish confirmation, a CIP rejection, and an unconfirmed close. These fields are independent of any earlier receive timeout or I/O error. [OpENer response implementation](https://github.com/EIPStackGroup/OpENer/blob/0e1ab7ee5c272950c0dc8daf7793008d7a518912/source/src/cip/cipconnectionmanager.c#L1087)
+
+| Headless 8 ms loopback case | End state | Close outcome | CSV rows |
+|---|---|---|---:|
+| CIP rejection | Close unconfirmed | Rejected (0x01, extended 0x0107) | 251 |
+| Mismatched connection identifiers | Close unconfirmed | Unconfirmed | 251 |
+| Truncated success reply | Close unconfirmed | Unconfirmed | 251 |
+| TCP closed before reply | Close unconfirmed | Unconfirmed | 251 |
+| Receive watchdog, then CIP rejection | Timed out | Rejected (0x01, extended 0x0107) | 75 |
+
+All five captures reported failure and saved all accepted rows. Qualification saved the first 1 ms trial after a close rejection and stopped before opening another connection. The headless GUI backend, reconnect, and Ctrl+C/Ctrl+Break tests also verified confirmed closes in their receipts.
+
+An independent three-second OpENer run requested and negotiated 30 ms in each direction. The scanner confirmed Forward_Close and wrote 101 accepted rows with zero sequence gaps, watchdog timeouts, or CSV overruns. These checks used localhost software adapters.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

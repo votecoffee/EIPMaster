@@ -1524,6 +1524,12 @@ impl Device {
         if let Some(e) = &self.status.cip_error {
             ui.colored_label(RED, format!("Connection Manager — {e}"));
         }
+        if let Some(close) = &self.status.forward_close {
+            ui.colored_label(
+                if close.is_confirmed() { CYAN } else { AMBER },
+                format!("Forward_Close {close}"),
+            );
+        }
         if let Some(active) = &self.active {
             egui::Grid::new("intervals")
                 .num_columns(3)
@@ -2016,6 +2022,7 @@ mod tests {
         );
         let link = &report["connection"];
         assert_eq!(link["state"].as_str(), Some("Closed"));
+        assert_eq!(link["forward_close"]["outcome"].as_str(), Some("confirmed"));
         assert_eq!(link["requested_ot_us"].as_integer(), Some(1000));
         assert_eq!(link["requested_to_us"].as_integer(), Some(1000));
         assert_eq!(link["actual_ot_us"].as_integer(), Some(1250));
