@@ -102,6 +102,10 @@ pub fn hex(data: &[u8]) -> String {
         .join(" ")
 }
 impl Settings {
+    pub fn input_only_without_writes(&self) -> bool {
+        self.input_only && self.output_size == 0 && self.config_size == 0 && !self.output_run_idle
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.device_ip.is_unspecified()
             || self.device_ip.is_multicast()

@@ -193,6 +193,10 @@ impl Capture {
             worker: Some(worker),
         })
     }
+    pub fn finished(&self) -> bool {
+        self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+
     pub fn stop(&mut self, slot: &Slot) {
         if self.worker.is_some() {
             *slot.write().unwrap() = None;

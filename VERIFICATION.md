@@ -79,6 +79,24 @@ Both fixtures received Forward_Close. Each stream had contiguous CSV sample inde
 python tools/benchmark.py .\target\release\assembly-scanner.exe .\.local\dual-adapter-check --dual-only
 ```
 
+## Headless recovery
+
+Three concurrent Windows CLI captures used separate localhost fixtures at an 8 ms RPI in both directions. Forward_Open returned 8 ms for both directions. One fixture stalled and resumed after its first reconnect delay. A second fault was injected by placing an existing file at the disk stream's next CSV part.
+
+| Stream | Result | CSV rows | Timeouts | T→O sequence gaps | CSV overruns |
+|---|---|---:|---:|---:|---:|
+| Healthy | Completed throughout both faults | 752 | 0 | 0 | 0 |
+| Recovered | Completed across generations 1 and 2 | 468 | 1 | 0 | 0 |
+| Disk fault | Reported the collision and exited incomplete | 250 | 0 | 0 | 0 |
+
+A repeat recorded one sequence gap on the healthy stream and zero on the recovered stream. Both completed with zero overruns.
+
+The recovered stream retained its UTC start and contiguous sample indexes. The disk stream saw 252 rows and confirmed 250 written. The existing file was preserved. A separate fixture changed its serial number after a timeout. The scanner preserved the 75 previously captured rows and rejected the new identity before Forward_Open. Rust tests cover the bounded retry delays, GUI retry cancellation, and releasing a failed GUI capture slot while another writer continues.
+
+```powershell
+python tools/test_recovery.py .\target\release\eipmaster-cli.exe .\.local\recovery-check
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

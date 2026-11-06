@@ -3,7 +3,7 @@ use crate::{
     eds::{self, Profile},
     model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
     preflight,
-    scanner::{self, Connection, Identity, Schedule, Spacing, Status},
+    scanner::{self, Connection, Identity, IdentityPin, Reconnect, Schedule, Spacing, Status},
     settings_file::{self, NamedDevice, Preferences, Session, Workspace},
 };
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -134,6 +134,8 @@ struct Device {
     notice: Option<String>,
     error: Option<String>,
     identity_task: Option<mpsc::Receiver<Result<Identity, String>>>,
+    verified_identity: Option<IdentityPin>,
+    reconnect: Option<Reconnect>,
     bench: Option<Benchmark>,
 }
 impl Device {
@@ -166,6 +168,8 @@ impl Device {
             notice: None,
             error: None,
             identity_task: None,
+            verified_identity: None,
+            reconnect: None,
             bench,
         };
         if let Some(bench) = &device.bench {
@@ -247,18 +251,25 @@ impl Device {
     }
 
     fn state_label(&self) -> &str {
-        if self.status.state.is_empty() {
+        if self.reconnect_pending().is_some() {
+            "Reconnect pending"
+        } else if self.status.state.is_empty() {
             "Offline"
         } else {
             self.status.state
         }
     }
 
+    fn reconnect_pending(&self) -> Option<(usize, Instant)> {
+        self.reconnect.as_ref().and_then(Reconnect::pending)
+    }
+
+    fn link_busy(&self) -> bool {
+        self.connection.is_some() || self.reconnect_pending().is_some()
+    }
+
     fn needs_repaint(&self) -> bool {
-        self.connection.is_some()
-            || self.capturing
-            || self.bench.is_some()
-            || self.identity_task.is_some()
+        self.link_busy() || self.capturing || self.bench.is_some() || self.identity_task.is_some()
     }
 
     fn load_profile(&mut self) {
@@ -266,6 +277,7 @@ impl Device {
         self.notice = None;
         match settings_file::load_profile(Path::new(&self.toml_path)) {
             Ok((settings, preferences)) => {
+                self.reset_endpoint_status();
                 self.device = settings.device_ip.to_string();
                 self.local = settings.local_ip.to_string();
                 self.settings = settings;
@@ -323,6 +335,16 @@ impl Device {
             Err(error) => self.error = Some(format!("Could not save {} — {error}", path.display())),
         }
     }
+    fn reset_endpoint_status(&mut self) {
+        self.verified_identity = None;
+        self.identity_task = None;
+        self.active = None;
+        self.status = Status::default();
+        self.tx = 0;
+        self.skipped = 0;
+        self.tx_spacing = Spacing::default();
+    }
+
     fn addresses(&self) -> Result<(Ipv4Addr, Ipv4Addr), String> {
         Ok((
             self.device
@@ -362,22 +384,15 @@ impl Device {
                     );
                 }
             }
-            let next = self.generation + 1;
-            let connection = Connection::start(
-                s.clone(),
-                self.slot.clone(),
-                next,
-                self.preferences.schedule,
-                self.writes_confirmed,
-            )?;
-            self.generation = next;
-            self.active = Some(s);
-            self.status = Status::default();
-            self.tx = 0;
-            self.skipped = 0;
-            self.tx_spacing = Spacing::default();
-            self.identity_task = None;
-            self.connection = Some(connection);
+            let pin = if self.preferences.auto_reconnect && s.input_only_without_writes() {
+                Some(self.verified_identity.ok_or(
+                    "Use Read identity and verify the adapter before enabling automatic reconnect",
+                )?)
+            } else {
+                None
+            };
+            self.open_connection(s, pin)?;
+            self.reconnect = pin.map(Reconnect::new);
             Ok(())
         })();
         self.bench_confirmed = false;
@@ -386,11 +401,54 @@ impl Device {
             self.error = Some(e);
         }
     }
+    fn open_connection(
+        &mut self,
+        settings: Settings,
+        pin: Option<IdentityPin>,
+    ) -> Result<(), String> {
+        let generation = self.generation + 1;
+        let schedule = self.preferences.schedule;
+        let connection = if let Some(pin) = pin {
+            Connection::start_pinned_input(
+                settings.clone(),
+                self.slot.clone(),
+                generation,
+                schedule,
+                pin,
+            )
+        } else {
+            Connection::start(
+                settings.clone(),
+                self.slot.clone(),
+                generation,
+                schedule,
+                self.writes_confirmed,
+            )
+        }?;
+        self.generation = generation;
+        self.active = Some(settings);
+        self.status = Status::default();
+        self.tx = 0;
+        self.skipped = 0;
+        self.tx_spacing = Spacing::default();
+        self.identity_task = None;
+        self.connection = Some(connection);
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        self.reconnect = None;
+        self.notice = None;
+        if let Some(connection) = &self.connection {
+            connection.stop();
+        }
+    }
+
     fn start_capture(&mut self) {
         let settings = self
             .active
             .as_ref()
-            .filter(|_| self.connection.is_some())
+            .filter(|_| self.link_busy())
             .unwrap_or(&self.settings);
         match Capture::start(
             &self.slot,
@@ -415,29 +473,63 @@ impl Device {
     fn poll(&mut self) {
         if let Some(c) = &self.connection {
             self.status = c.status.lock().unwrap().clone();
+            let finished = c.finished();
             self.tx = c.tx.load(Relaxed);
             self.skipped = c.skipped.load(Relaxed);
             self.tx_spacing = *c.tx_spacing.lock().unwrap();
-            if c.finished() {
+            if finished {
                 let c = self.connection.take().unwrap();
                 self.status = c.status.lock().unwrap().clone();
                 c.join();
                 self.writes_confirmed = false;
+                if let Some(reconnect) = &mut self.reconnect {
+                    if !self.status.retryable {
+                        self.reconnect = None;
+                    } else if !reconnect.schedule(Instant::now()) {
+                        self.reconnect = None;
+                        self.error = Some("Automatic reconnect stopped after three retries".into());
+                    }
+                }
             }
+        }
+        if let Some((attempt, _)) = self.reconnect_pending()
+            && let Some(pin) = self.reconnect.as_mut().unwrap().take_ready(Instant::now())
+        {
+            let settings = self.active.as_ref().expect("reconnect settings").clone();
+            match self.open_connection(settings, Some(pin)) {
+                Ok(()) => self.notice = Some(format!("Automatic reconnect attempt {attempt} of 3")),
+                Err(error) => {
+                    self.reconnect = None;
+                    self.error = Some(error);
+                }
+            }
+        }
+        if self.capturing && self.capture.as_ref().is_some_and(Capture::finished) {
+            self.stop_capture();
         }
         if let Some(task) = &self.identity_task {
             match task.try_recv() {
                 Ok(result) => {
-                    let update = |status: &mut Status| match &result {
+                    match result {
                         Ok(identity) => {
-                            status.identity = Some(identity.clone());
-                            status.identity_error = None;
+                            self.verified_identity = Some(identity.pin());
+                            self.status.identity = Some(identity);
+                            self.status.identity_error = None;
                         }
-                        Err(error) => status.identity_error = Some(error.clone()),
-                    };
-                    update(&mut self.status);
-                    if let Some(c) = &self.connection {
-                        update(&mut c.status.lock().unwrap());
+                        Err(error) => {
+                            self.verified_identity = None;
+                            if self.connection.is_none() {
+                                self.status.identity = None;
+                            }
+                            self.status.identity_error = Some(error);
+                        }
+                    }
+                    if let Some(connection) = &self.connection {
+                        let mut status = connection.status.lock().unwrap();
+                        status.identity.clone_from(&self.status.identity);
+                        status
+                            .identity_error
+                            .clone_from(&self.status.identity_error);
                     }
                     self.identity_task = None;
                 }
@@ -734,7 +826,7 @@ impl App {
         self.devices
             .iter()
             .enumerate()
-            .filter(|(index, device)| *index != self.selected && device.connection.is_some())
+            .filter(|(index, device)| *index != self.selected && device.link_busy())
             .filter_map(|(_, device)| device.active.as_ref())
             .filter(|settings| settings.local_udp_port != 0)
             .map(|settings| (settings.local_ip, settings.local_udp_port))
@@ -930,7 +1022,7 @@ fn edit_fields(
 
 impl Device {
     fn setup(&mut self, ui: &mut Ui, reserved_ports: &[(Ipv4Addr, u16)]) {
-        let online = self.connection.is_some();
+        let online = self.link_busy();
         title(ui, "01", "Device setup");
         ui.add_enabled_ui(!online && !self.capturing, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -1004,6 +1096,7 @@ impl Device {
                 let local_changed = ui.text_edit_singleline(&mut self.local).changed();
                 ui.end_row();
                 if device_changed || local_changed {
+                    self.reset_endpoint_status();
                     self.bench_confirmed = false;
                     self.writes_confirmed = false;
                 }
@@ -1109,7 +1202,9 @@ impl Device {
             }
         });
         if online || self.capturing {
-            ui.small("Setup and value selection are held while connected or capturing.");
+            ui.small(
+                "Setup and value selection are held while connected, reconnecting, or capturing.",
+            );
         }
         ui.separator();
         ui.label("Staged output hex bytes");
@@ -1157,7 +1252,19 @@ impl Device {
                 ui.label(format!("Transmitting buffer · {}", model::hex(&applied)));
             }
             if ui.button("Disconnect").clicked() {
-                c.stop();
+                self.disconnect();
+            }
+        } else if let Some((attempt, due)) = self.reconnect_pending() {
+            ui.colored_label(
+                AMBER,
+                format!(
+                    "Reconnect {attempt} of 3 in {:.1} s",
+                    due.saturating_duration_since(Instant::now()).as_secs_f32()
+                ),
+            );
+            if ui.button("Cancel reconnect").clicked() {
+                self.disconnect();
+                self.notice = Some("Automatic reconnect canceled".into());
             }
         } else {
             if !self.settings.input_only {
@@ -1189,6 +1296,15 @@ impl Device {
                     &mut self.writes_confirmed,
                     "Ownership and these output/configuration writes are authorized",
                 );
+            }
+            if self.settings.input_only_without_writes() {
+                ui.checkbox(
+                    &mut self.preferences.auto_reconnect,
+                    "Reconnect automatically",
+                );
+                if self.preferences.auto_reconnect && self.verified_identity.is_none() {
+                    ui.small("Use Read identity to verify this device before connecting.");
+                }
             }
             ui.horizontal(|ui| {
                 if ui.button("Connect").clicked() {
@@ -1356,18 +1472,13 @@ impl Device {
         }
         if ui
             .add_enabled(
-                self.identity_task.is_none(),
+                self.reconnect_pending().is_none() && self.identity_task.is_none(),
                 egui::Button::new("Read identity"),
             )
             .clicked()
         {
-            let cfg = self
-                .active
-                .as_ref()
-                .filter(|_| self.connection.is_some())
-                .cloned()
-                .map_or_else(|| self.current(), Ok);
-            match cfg {
+            self.verified_identity = None;
+            match self.current() {
                 Ok(cfg) => {
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
@@ -1635,6 +1746,69 @@ mod tests {
                 .unwrap()
                 .contains("already reserved")
         );
+    }
+
+    #[test]
+    fn automatic_reconnect_requires_an_identity_and_can_be_canceled() {
+        let mut device = Device::new(1, None);
+        device.preferences.auto_reconnect = true;
+        device.connect(&[]);
+        assert!(device.connection.is_none());
+        assert!(device.error.as_deref().unwrap().contains("Read identity"));
+
+        let pin = IdentityPin {
+            key: (0, 12, 1),
+            serial: 1,
+        };
+        let mut reconnect = Reconnect::new(pin);
+        assert!(reconnect.schedule(Instant::now()));
+        device.reconnect = Some(reconnect);
+        assert!(device.link_busy());
+        device.disconnect();
+        device.poll();
+        assert!(!device.link_busy());
+
+        device.verified_identity = Some(pin);
+        device.reset_endpoint_status();
+        assert!(device.verified_identity.is_none());
+    }
+
+    #[test]
+    fn disk_failure_releases_only_the_failed_capture_slot() {
+        let directory = temporary("capture-isolation");
+        let mut healthy = Device::new(1, None);
+        healthy.preferences.directory = directory.join("healthy").display().to_string();
+        healthy.start_capture();
+        let mut failing = Device::new(2, None);
+        failing.preferences.directory = directory.join("failing").display().to_string();
+        failing.preferences.rotate_bytes = 1;
+        failing.start_capture();
+        let failing_sink = failing.capture.as_ref().unwrap().sink.clone();
+        let sentinel = PathBuf::from(format!("{}-000002.csv", failing_sink.prefix.display()));
+        fs::write(&sentinel, "existing file").unwrap();
+        for sequence in 1..=2 {
+            failing_sink.record(Instant::now(), 1, sequence, sequence as u16, &[0; 4]);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while failing.capturing && Instant::now() < deadline {
+            failing.poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!failing.capturing && failing.slot.read().unwrap().is_none());
+        assert!(failing_sink.error.lock().unwrap().is_some());
+        assert!(healthy.capturing && healthy.slot.read().unwrap().is_some());
+        let healthy_sink = healthy.capture.as_ref().unwrap().sink.clone();
+        healthy_sink.record(Instant::now(), 1, 1, 1, &[0; 4]);
+        healthy.stop_capture();
+        assert_eq!(healthy_sink.written.load(Relaxed), 1);
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "existing file");
+        for name in ["healthy", "failing"] {
+            for file in fs::read_dir(directory.join(name)).unwrap() {
+                fs::remove_file(file.unwrap().path()).unwrap();
+            }
+            fs::remove_dir(directory.join(name)).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

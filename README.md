@@ -51,13 +51,19 @@ Launch the executable from the repository root so the sample paths resolve. For 
 
 The Windows GUI automatically remembers the device list and selected device in `%LOCALAPPDATA%\EIPMaster\last-session.toml`. It saves edited settings while the window is open and on a normal close. Each setup includes device and NIC settings, imported EDS profiles and overrides, assembly mappings, staged bytes, and CSV and scheduler preferences. An older single-device session opens as **Device 1**. The app starts offline. Confirm the bench and any output or configuration writes again for each device before connecting.
 
-To keep a named setup, enter a TOML path in **Settings TOML** and select **Save**. Enter a new path to save a separate profile, or select **Replace profile** to update an existing file. Select **Load** to switch to a saved profile while disconnected and with capture stopped. Older profiles still load. The optional `[app]` table stores the capture directory, buffer capacity, rotation limits and scheduler.
+To keep a named setup, enter a TOML path in **Settings TOML** and select **Save**. Enter a new path to save a separate profile, or select **Replace profile** to update an existing file. Select **Load** to switch to a saved profile while disconnected and with capture stopped. Older profiles still load. The optional `[app]` table stores the capture directory, buffer capacity, rotation limits, scheduler, and automatic reconnect preference.
 
 ### Work with multiple adapters
 
 Choose **Add device**, give the setup a name, then enter its settings or load a named TOML profile. Use the **Devices** list to switch between setups while other connections and captures keep running. Each setup has its own identity, connection state, counters, staged bytes, write confirmation, and capture controls. Stop capture and disconnect the selected device before removing its setup.
 
 Use local UDP port 0 when the adapter supports an automatically assigned port. Two simultaneous connections cannot reserve the same fixed local IPv4 address and UDP port. If both adapters require the same fixed port, assign each connection a distinct supported local IPv4 bind address. A fixed port already in use outside EIPMaster can also cause a bind error.
+
+### Recover an input-only session
+
+Select **Read identity**, verify the adapter, then enable **Reconnect automatically** and connect. The scanner checks the verified vendor, device type, product code, and serial number before each Forward_Open. Automatic reconnect is off by default and applies only to input-only heartbeat profiles with zero output and configuration bytes and O→T Run/Idle disabled. After a receive watchdog timeout or transport I/O error, the scanner waits 1, 2, then 4 seconds for up to three retries per manual connection. An identity mismatch or CIP rejection ends the retry sequence. **Disconnect** or **Cancel reconnect** stops retries for that device.
+
+Keep capture armed to keep the original capture start and sample indexes across a reconnect. The next successful connection uses a new CSV generation. Live packet and spacing counters describe the current connection. A disk error disarms only the failed GUI capture and shows its unconfirmed row count. The scanner can still show live inputs, and other devices continue independently.
 
 ### Connect to a bench adapter
 
@@ -118,6 +124,8 @@ The console executable uses the same EDS importer, scanner and CSV writer as the
 
 Start `python tools/loopback_adapter.py .local/adapter.json` in another console before each localhost `identity` or `capture` example. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The CLI uses the profile's buffer capacity, rotation limits and scheduler when present, and its explicit output directory argument takes precedence. Capture runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report includes the last accepted assembly payload in hex alongside its decoded value. It separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots, unchanged samples and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
 
+For headless recovery, set `auto_reconnect = true` in the profile's `[app]` table. The CLI verifies the requested vendor, device type, and product code on the first session and pins its serial number for retries. The original capture deadline includes reconnect time. The report totals counters across attempts and includes an `[[attempts]]` entry with actual intervals and observed spacing for each generation. Top-level actual intervals and spacing refer to the final attempt. If the deadline expires during an outage, the CLI reports the incomplete capture and exits nonzero.
+
 Use the capture prefix shown in the GUI to join the parts in order after stopping capture.
 
 ```powershell
@@ -144,6 +152,7 @@ The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exerci
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --locked --release
 python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\cli-check
+python tools/test_recovery.py .\target\release\eipmaster-cli.exe .\.local\recovery-check
 ```
 
 ## Roadmap

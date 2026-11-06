@@ -47,6 +47,87 @@ impl Identity {
     pub fn key(&self) -> IdentityKey {
         (self.vendor, self.device_type, self.code)
     }
+
+    pub fn pin(&self) -> IdentityPin {
+        IdentityPin {
+            key: self.key(),
+            serial: self.serial,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityPin {
+    pub key: IdentityKey,
+    pub serial: u32,
+}
+
+enum ExpectedIdentity {
+    Model(IdentityKey),
+    Device(IdentityPin),
+}
+
+impl ExpectedIdentity {
+    fn mismatch(&self, actual: &Identity) -> Option<String> {
+        match *self {
+            Self::Model((vendor, device_type, product))
+                if (vendor, device_type, product) != actual.key() =>
+            {
+                Some(format!(
+                    "Identity mismatch. Expected vendor:type:product {vendor}:{device_type}:{product}, got {}:{}:{}",
+                    actual.vendor, actual.device_type, actual.code
+                ))
+            }
+            Self::Device(pin) if pin != actual.pin() => Some(format!(
+                "Identity mismatch. Expected {:?}, serial {:08X}; got {:?}, serial {:08X}",
+                pin.key,
+                pin.serial,
+                actual.key(),
+                actual.serial
+            )),
+            _ => None,
+        }
+    }
+}
+
+const RETRY_SECONDS: [u64; 3] = [1, 2, 4];
+
+/// A retry budget for one explicitly started input-only session.
+pub struct Reconnect {
+    pin: IdentityPin,
+    tried: usize,
+    due: Option<Instant>,
+}
+
+impl Reconnect {
+    pub fn new(pin: IdentityPin) -> Self {
+        Self {
+            pin,
+            tried: 0,
+            due: None,
+        }
+    }
+
+    pub fn schedule(&mut self, now: Instant) -> bool {
+        self.due = RETRY_SECONDS
+            .get(self.tried)
+            .map(|seconds| now + Duration::from_secs(*seconds));
+        self.due.is_some()
+    }
+
+    pub fn pending(&self) -> Option<(usize, Instant)> {
+        self.due.map(|due| (self.tried + 1, due))
+    }
+
+    pub fn take_ready(&mut self, now: Instant) -> Option<IdentityPin> {
+        if self.due.is_some_and(|due| now >= due) {
+            self.due = None;
+            self.tried += 1;
+            Some(self.pin)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
@@ -119,6 +200,7 @@ pub struct Status {
     pub late: u64,
     pub invalid: u64,
     pub timeouts: u64,
+    pub retryable: bool,
     pub spacing: Spacing,
 }
 
@@ -165,7 +247,31 @@ impl Connection {
         expected: IdentityKey,
         schedule: Schedule,
     ) -> std::result::Result<Self, String> {
-        Self::start_inner(settings, slot, 1, schedule, false, Some(expected))
+        Self::start_inner(
+            settings,
+            slot,
+            1,
+            schedule,
+            false,
+            Some(ExpectedIdentity::Model(expected)),
+        )
+    }
+
+    pub fn start_pinned_input(
+        settings: Settings,
+        slot: Slot,
+        generation: u64,
+        schedule: Schedule,
+        expected: IdentityPin,
+    ) -> std::result::Result<Self, String> {
+        Self::start_inner(
+            settings,
+            slot,
+            generation,
+            schedule,
+            false,
+            Some(ExpectedIdentity::Device(expected)),
+        )
     }
 
     fn start_inner(
@@ -174,12 +280,10 @@ impl Connection {
         generation: u64,
         schedule: Schedule,
         permit_writes: bool,
-        expected: Option<IdentityKey>,
+        expected: Option<ExpectedIdentity>,
     ) -> std::result::Result<Self, String> {
         settings.validate()?;
-        if !permit_writes
-            && (!settings.input_only || settings.config_size != 0 || settings.output_run_idle)
-        {
+        if !permit_writes && !settings.input_only_without_writes() {
             return Err(
                 "Confirm bench ownership, configuration and output permission first".into(),
             );
@@ -212,6 +316,7 @@ impl Connection {
                 let mut status = shared.status.lock().unwrap();
                 if let Err(error) = result {
                     status.state = "Error";
+                    status.retryable = matches!(error, EipError::Io(_));
                     match error {
                         EipError::Cip { status: code, ext } => {
                             status.cip_error = Some(format!(
@@ -421,7 +526,7 @@ fn run(
     slot: &Slot,
     generation: u64,
     schedule: Schedule,
-    expected: Option<IdentityKey>,
+    expected: Option<ExpectedIdentity>,
     shared: &mut Shared,
 ) -> Result<()> {
     let mut session = Session::open(cfg)?;
@@ -429,26 +534,18 @@ fn run(
         let id = identity(&mut session);
         let mut state = shared.status.lock().unwrap();
         if let Some(expected) = expected {
-            match id {
-                Ok(ref actual) if actual.key() != expected => {
-                    let message = format!(
-                        "Identity mismatch. Expected vendor:type:product {}:{}:{}, got {}:{}:{}",
-                        expected.0,
-                        expected.1,
-                        expected.2,
-                        actual.vendor,
-                        actual.device_type,
-                        actual.code
-                    );
-                    state.identity = Some(actual.clone());
-                    state.identity_error = Some(message.clone());
-                    return Err(protocol(message));
+            match &id {
+                Ok(actual) => {
+                    if let Some(message) = expected.mismatch(actual) {
+                        state.identity = Some(actual.clone());
+                        state.identity_error = Some(message.clone());
+                        return Err(protocol(message));
+                    }
                 }
-                Err(ref error) => {
+                Err(error) => {
                     state.identity_error = Some(error.to_string());
-                    return Err(protocol("Identity verification failed before Forward_Open"));
+                    return id.map(|_| ());
                 }
-                _ => {}
             }
         }
         match id {
@@ -746,6 +843,7 @@ fn receive(
             })
         {
             status.timeouts += 1;
+            status.retryable = true;
             status.state = "Timed out";
             break Ok(());
         }
@@ -766,4 +864,30 @@ fn publish_receive_status(shared: &Shared, status: &mut Status, selection: model
     status.identity.clone_from(&latest.identity);
     status.identity_error.clone_from(&latest.identity_error);
     latest.clone_from(status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_is_bounded_to_three_attempts() {
+        let pin = IdentityPin {
+            key: (1, 2, 3),
+            serial: 4,
+        };
+        let mut reconnect = Reconnect::new(pin);
+        let mut now = Instant::now();
+        for (attempt, seconds) in [1, 2, 4].into_iter().enumerate() {
+            assert!(reconnect.schedule(now));
+            let due = now + Duration::from_secs(seconds);
+            assert_eq!(reconnect.pending(), Some((attempt + 1, due)));
+            assert_eq!(reconnect.take_ready(due - Duration::from_millis(1)), None);
+            assert_eq!(reconnect.take_ready(due), Some(pin));
+            assert_eq!(reconnect.take_ready(due), None);
+            now = due;
+        }
+        assert!(!reconnect.schedule(now));
+        assert_eq!(reconnect.pending(), None);
+    }
 }

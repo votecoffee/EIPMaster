@@ -14,6 +14,8 @@ pub struct Preferences {
     pub rotate_bytes: u64,
     pub rotate_seconds: u64,
     pub schedule: Schedule,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_reconnect: bool,
 }
 
 impl Default for Preferences {
@@ -24,6 +26,7 @@ impl Default for Preferences {
             rotate_bytes: 0,
             rotate_seconds: 0,
             schedule: Schedule::Deadline,
+            auto_reconnect: false,
         }
     }
 }

@@ -3,7 +3,9 @@ use assembly_scanner::{
     eds,
     model::Settings,
     preflight,
-    scanner::{Connection, Identity, IdentityKey, Schedule, Spacing, read_identity},
+    scanner::{
+        Connection, Identity, IdentityKey, Reconnect, Schedule, Spacing, Status, read_identity,
+    },
     settings_file,
 };
 use serde::Serialize;
@@ -26,7 +28,7 @@ Usage:
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
   eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product>
 
-Capture requires an input-only profile. The scheduler defaults to deadline.
+Capture requires an input-only profile. The scheduler defaults to deadline. [app].auto_reconnect opts in to input-only recovery.
 The expected Identity Object values are decimal and checked before Forward_Open.
 Seconds must be an integer from 1 to 3600.";
 
@@ -211,6 +213,69 @@ struct Report {
     identity: Option<Identity>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attempts: Vec<AttemptReport>,
+}
+
+#[derive(Serialize)]
+struct AttemptReport {
+    generation: usize,
+    state: &'static str,
+    actual_ot_us: Option<u32>,
+    actual_to_us: Option<u32>,
+    accepted: u64,
+    sequence_gaps: u64,
+    timeouts: u64,
+    identity_error: Option<String>,
+    cip_error: Option<String>,
+    network_error: Option<String>,
+    receive_spacing: Spacing,
+    send_spacing: Spacing,
+}
+
+#[derive(Default)]
+struct Attempt {
+    status: Status,
+    sent: u64,
+    skipped: u64,
+    send_spacing: Spacing,
+}
+
+impl Attempt {
+    fn finish(connection: Connection) -> Self {
+        let status = connection.status.clone();
+        let tx = connection.tx.clone();
+        let skipped = connection.skipped.clone();
+        let send_spacing = connection.tx_spacing.clone();
+        connection.join();
+        let status = status.lock().unwrap().clone();
+        let send_spacing = *send_spacing.lock().unwrap();
+        Self {
+            status,
+            sent: tx.load(Relaxed),
+            skipped: skipped.load(Relaxed),
+            send_spacing,
+        }
+    }
+
+    fn report(&self, generation: usize) -> AttemptReport {
+        let status = &self.status;
+        let (actual_ot_us, actual_to_us) = status.actual.unzip();
+        AttemptReport {
+            generation,
+            state: status.state,
+            actual_ot_us,
+            actual_to_us,
+            accepted: status.valid,
+            sequence_gaps: status.gaps,
+            timeouts: status.timeouts,
+            identity_error: status.identity_error.clone(),
+            cip_error: status.cip_error.clone(),
+            network_error: status.network_error.clone(),
+            receive_spacing: status.spacing,
+            send_spacing: self.send_spacing,
+        }
+    }
 }
 
 fn capture(
@@ -222,7 +287,7 @@ fn capture(
     let (settings, preferences) = settings_file::load_profile(profile)?;
     let preferences = preferences.unwrap_or_default();
     settings.validate()?;
-    if !settings.input_only || settings.config_size != 0 || settings.output_run_idle {
+    if !settings.input_only_without_writes() {
         return Err("Capture requires an input-only heartbeat with zero configuration bytes and O->T Run/Idle disabled".into());
     }
     settings.csv_fields()?;
@@ -244,50 +309,113 @@ fn capture(
         &settings,
     )
     .map_err(|e| e.to_string())?;
-    let connection = match Connection::start_verified_input_with_schedule(
-        settings.clone(),
-        slot.clone(),
-        expected,
-        preferences.schedule,
-    ) {
-        Ok(connection) => connection,
-        Err(error) => {
-            capture.stop(&slot);
-            return Err(error);
-        }
-    };
+    let sink = capture.sink.clone();
+    let mut attempts = Vec::new();
+    let mut reconnect = None;
+    let mut pin = None;
     let mut deadline = None;
     let mut duration_reached = false;
-    while !connection.finished() {
-        let now = Instant::now();
-        if deadline.is_none()
-            && let Some(age) = connection.input_age()
-        {
-            deadline = Some(now - age + Duration::from_secs(seconds));
+    'capture: loop {
+        let connection = match pin {
+            Some(pin) => Connection::start_pinned_input(
+                settings.clone(),
+                slot.clone(),
+                attempts.len() as u64 + 1,
+                preferences.schedule,
+                pin,
+            ),
+            None => Connection::start_verified_input_with_schedule(
+                settings.clone(),
+                slot.clone(),
+                expected,
+                preferences.schedule,
+            ),
+        };
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(error) if !attempts.is_empty() => {
+                attempts.push(Attempt {
+                    status: Status {
+                        state: "Error",
+                        network_error: Some(error),
+                        ..Status::default()
+                    },
+                    ..Attempt::default()
+                });
+                break;
+            }
+            Err(error) => {
+                capture.stop(&slot);
+                return Err(error);
+            }
+        };
+        while !connection.finished() {
+            let now = Instant::now();
+            if deadline.is_none()
+                && let Some(age) = connection.input_age()
+            {
+                deadline = Some(now - age + Duration::from_secs(seconds));
+            }
+            if deadline.is_some_and(|end| now >= end) {
+                duration_reached = true;
+                connection.stop();
+                break;
+            }
+            if capture.finished() {
+                connection.stop();
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        if deadline.is_some_and(|end| now >= end) {
-            duration_reached = true;
-            connection.stop();
-            break;
-        }
-        if capture.sink.error.lock().unwrap().is_some() {
-            connection.stop();
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
 
-    let status = connection.status.clone();
-    let tx = connection.tx.clone();
-    let skipped = connection.skipped.clone();
-    let tx_spacing = connection.tx_spacing.clone();
-    connection.join();
+        let attempt = Attempt::finish(connection);
+        if preferences.auto_reconnect
+            && attempts.is_empty()
+            && attempt.status.identity_error.is_none()
+        {
+            reconnect = attempt
+                .status
+                .identity
+                .as_ref()
+                .map(|id| Reconnect::new(id.pin()));
+        }
+        let retryable = attempt.status.retryable;
+        attempts.push(attempt);
+        if duration_reached || capture.finished() || !retryable {
+            break;
+        }
+        let Some(reconnect) = reconnect.as_mut() else {
+            break;
+        };
+        if !reconnect.schedule(Instant::now()) {
+            break;
+        }
+        loop {
+            let now = Instant::now();
+            if deadline.is_some_and(|end| now >= end) {
+                duration_reached = true;
+                break 'capture;
+            }
+            if capture.finished() {
+                break 'capture;
+            }
+            if let Some(next) = reconnect.take_ready(now) {
+                pin = Some(next);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     capture.stop(&slot);
-    let status = status.lock().unwrap().clone();
-    let (actual_ot_us, actual_to_us) = status
-        .actual
-        .map_or((None, None), |(ot, to)| (Some(ot), Some(to)));
-    let sink = &capture.sink;
+    let last = attempts.last().unwrap();
+    let status = &last.status;
+    let last_input = attempts
+        .iter()
+        .rev()
+        .find(|run| run.status.valid != 0)
+        .map(|run| &run.status);
+    let (actual_ot_us, actual_to_us) = status.actual.unzip();
+    let sum = |field: fn(&Attempt) -> u64| attempts.iter().map(field).sum();
     let report = Report {
         state: status.state,
         adapter_ip: settings.device_ip,
@@ -301,29 +429,39 @@ fn capture(
         requested_to_us: settings.input_rpi_us,
         actual_ot_us,
         actual_to_us,
-        accepted: status.valid,
-        sequence_gaps: status.gaps,
-        duplicates: status.duplicates,
-        late: status.late,
-        invalid: status.invalid,
-        timeouts: status.timeouts,
-        sent: tx.load(Relaxed),
-        skipped_deadlines: skipped.load(Relaxed),
+        accepted: sum(|run| run.status.valid),
+        sequence_gaps: sum(|run| run.status.gaps),
+        duplicates: sum(|run| run.status.duplicates),
+        late: sum(|run| run.status.late),
+        invalid: sum(|run| run.status.invalid),
+        timeouts: sum(|run| run.status.timeouts),
+        sent: sum(|run| run.sent),
+        skipped_deadlines: sum(|run| run.skipped),
         seen: sink.seen.load(Relaxed),
         unchanged: sink.unchanged.load(Relaxed),
         written: sink.written.load(Relaxed),
         buffer_overruns: sink.overrun.load(Relaxed),
-        last_value: status.value.map(|v| v.to_string()),
-        last_input_hex: (!status.input.is_empty())
-            .then(|| assembly_scanner::model::hex(&status.input)),
+        last_value: last_input
+            .and_then(|run| run.value.as_ref())
+            .map(ToString::to_string),
+        last_input_hex: last_input.map(|run| assembly_scanner::model::hex(&run.input)),
         csv_prefix: sink.prefix.display().to_string(),
-        identity_error: status.identity_error,
-        cip_error: status.cip_error,
-        network_error: status.network_error,
+        identity_error: status.identity_error.clone(),
+        cip_error: status.cip_error.clone(),
+        network_error: status.network_error.clone(),
         disk_error: sink.error.lock().unwrap().clone(),
-        identity: status.identity,
+        identity: status.identity.clone(),
         receive_spacing: status.spacing,
-        send_spacing: *tx_spacing.lock().unwrap(),
+        send_spacing: last.send_spacing,
+        attempts: if preferences.auto_reconnect {
+            attempts
+                .iter()
+                .enumerate()
+                .map(|(index, run)| run.report(index + 1))
+                .collect()
+        } else {
+            Vec::new()
+        },
     };
     let text = toml::to_string_pretty(&report).map_err(|e| e.to_string())?;
     report_file
@@ -333,6 +471,7 @@ fn capture(
     print!("{text}");
     Ok(report.state == "Closed"
         && report.duration_reached
+        && status.valid != 0
         && report.written != 0
         && report.written + report.unchanged == report.accepted
         && report.disk_error.is_none())

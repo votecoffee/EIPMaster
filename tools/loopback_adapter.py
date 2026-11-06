@@ -126,14 +126,14 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     })
 
 
-def serve(tcp, udp, mode, report):
+def serve(tcp, udp, mode, report, serial_delta=0):
     stop = threading.Event()
     io = None
     owner = mode == "owner"
     adapter_ip = tcp.getsockname()[0]
     scanner_ip = tcp.getpeername()[0]
     adapter_index = int(IPv4Address(adapter_ip)) - int(IPv4Address(IP))
-    serial_number = 0x12345678 + adapter_index
+    serial_number = 0x12345678 + adapter_index + serial_delta
     value_base = (adapter_index % 1000) * 100_000
     report.update(serial_number=serial_number, value_base=value_base)
     path = bytes.fromhex("20 04 24 01 2C 64 2C 65" if owner else "20 04 24 01 2C FE 2C 65")
@@ -205,7 +205,7 @@ def serve(tcp, udp, mode, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
-    parser.add_argument("--mode", choices=("normal", "faults", "stall", "reject", "different-api", "owner", "reconnect"), default="normal")
+    parser.add_argument("--mode", choices=("normal", "faults", "stall", "reject", "different-api", "owner", "reconnect", "recover", "replacement"), default="normal")
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
     if not args.address.is_loopback:
@@ -217,12 +217,23 @@ def main():
         listener.listen(1)
         listener.settimeout(30)
         print("Ready on loopback", flush=True)
-        for _ in range(2 if args.mode == "reconnect" else 1):
+        recovery = args.mode in ("recover", "replacement")
+        if recovery:
+            modes = ("stall", "normal")
+            report["attempts"] = []
+        elif args.mode == "reconnect":
+            modes = ("normal", "normal")
+        else:
+            modes = (args.mode,)
+        for index, mode in enumerate(modes):
             conn, _ = listener.accept()
             with conn, socket.socket(type=socket.SOCK_DGRAM) as udp:
                 conn.settimeout(20)
                 udp.bind((address, 0))
-                serve(conn, udp, args.mode, report)
+                attempt = {"forward_close": False} if recovery else report
+                serve(conn, udp, mode, attempt, serial_delta=int(args.mode == "replacement" and index == 1))
+                if recovery:
+                    report["attempts"].append(attempt)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
 
