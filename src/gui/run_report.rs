@@ -1,5 +1,6 @@
 use super::Device;
 use crate::{
+    capture::FieldSummary,
     model::CaptureMode,
     scanner::{CloseOutcome, Identity, ReceiveTimeout, Schedule, SendTiming, Spacing},
     settings_file,
@@ -83,6 +84,8 @@ struct CaptureReport<'a> {
     buffer_overruns: u64,
     unconfirmed_rows: u64,
     disk_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    field_summaries: Vec<FieldSummary>,
 }
 
 impl Device {
@@ -164,6 +167,7 @@ impl Device {
                 buffer_overruns,
                 unconfirmed_rows: seen.saturating_sub(written + unchanged + buffer_overruns),
                 disk_error: sink.error.lock().unwrap().clone(),
+                field_summaries: sink.field_summaries(),
             },
             connection: self.capture_run.connection.as_ref(),
         };

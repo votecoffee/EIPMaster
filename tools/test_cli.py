@@ -60,6 +60,24 @@ def check_spacing(capture, samples):
         assert bool(send[key]) == (send["max_us"] >= multiple * capture["actual_ot_us"])
 
 
+def check_field_summaries(report, names, samples):
+    summaries = report["field_summaries"]
+    assert [field["name"] for field in summaries] == names
+    for column, summary in enumerate(summaries, len(METADATA)):
+        values = [row[column] for row in samples]
+        assert summary["first_value"] == values[0] and summary["last_value"] == values[-1]
+        assert summary["changes_within_generation"] == sum(
+            left[3] == right[3] and left[column] != right[column]
+            for left, right in pairwise(samples)
+        )
+        if summary["selection"]["kind"] == "Bool":
+            assert "minimum" not in summary and "maximum" not in summary
+        else:
+            numbers = [int(value) for value in values]
+            assert summary["minimum"] == str(min(numbers))
+            assert summary["maximum"] == str(max(numbers))
+
+
 def check_close_failures(capture_command, root):
     for mode in ("close-reject", "close-mismatch", "close-short", "close-eof", "stall-close-reject"):
         out = root / mode
@@ -133,6 +151,7 @@ def check_qualification(exe, root):
             assert [int(row[2]) for row in samples] == list(range(capture["written"]))
             assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
             check_spacing(capture, samples)
+            check_field_summaries(capture, ["value"], samples)
             if case == "interval-mismatch" and index == 1:
                 assert (capture["actual_ot_us"], capture["actual_to_us"]) == (1250, 1500)
                 assert any("Forward_Open intervals differ" in error for error in trial["errors"])
@@ -371,6 +390,7 @@ def main():
         expected = int(row[4]) // 16
         payload = expected.to_bytes(4, "little")
         assert list(map(int, row[6:])) == [expected, int.from_bytes(payload[:2], "big"), payload[3]]
+    check_field_summaries(multi_report, [name for name, *_ in fields], multi_samples)
 
     mapped = root / "mapped.toml"
     mapped.write_text(test_profile(PROFILE.with_name("mapped-loopback.toml"))
@@ -391,6 +411,7 @@ def main():
     assert filtered_report["unchanged"] > len(changed)
     assert filtered_report["written"] + filtered_report["unchanged"] == filtered_report["accepted"]
     assert [int(row[2]) for row in changed] == list(range(len(changed)))
+    check_field_summaries(filtered_report, ["counter", "low_bit"], changed)
     for i, row in enumerate(changed):
         value = int(row[4]) // 16
         assert int(row[6]) == value

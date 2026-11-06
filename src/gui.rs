@@ -1904,6 +1904,7 @@ mod tests {
         assert!(report["capture"]["disk_error"].as_str().is_some());
         assert_eq!(report["capture"]["unconfirmed_rows"].as_integer(), Some(1));
         assert_eq!(report["capture"]["buffer_overruns"].as_integer(), Some(0));
+        assert!(report["capture"].get("field_summaries").is_none());
         for name in ["healthy", "failing"] {
             for file in fs::read_dir(directory.join(name)).unwrap() {
                 fs::remove_file(file.unwrap().path()).unwrap();
@@ -1977,6 +1978,11 @@ mod tests {
         assert_eq!(capture["seen"].as_integer(), Some(3));
         assert_eq!(capture["written"].as_integer(), Some(2));
         assert_eq!(capture["unchanged"].as_integer(), Some(1));
+        let summary = &capture["field_summaries"].as_array().unwrap()[0];
+        assert_eq!(summary["name"].as_str(), Some("value"));
+        assert_eq!(summary["first_value"].as_str(), Some("0"));
+        assert_eq!(summary["last_value"].as_str(), Some("0"));
+        assert_eq!(summary["changes_within_generation"].as_integer(), Some(0));
         let connection = &report["connection"];
         assert_eq!(connection["generation"].as_integer(), Some(2));
         assert_eq!(connection["adapter_ip"].as_str(), Some("127.0.0.2"));

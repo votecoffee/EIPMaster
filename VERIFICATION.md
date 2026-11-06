@@ -276,6 +276,14 @@ A separate 60-second headless loopback run requested 1,000 microseconds in both 
 
 The scanner skipped 72 scheduled sends and the fixture skipped 61. These were loopback socket measurements.
 
+## Logged field summaries
+
+The CSV writer summarizes each selected column across rotated parts. The reports include the mapping, first and last saved values, finite numeric bounds, and changes between adjacent saved rows in the same connection generation. Unit tests cover exact 64-bit integer bounds, nonfinite floats, quoted text, on-change logging, rotation, and disk failure.
+
+A 60-second localhost run used a synthetic 32-byte input assembly with three signed 32-bit fields. Two fields varied and each reported 3,675 changes. The third field was constant and reported zero changes. All three summaries matched the independently parsed CSV values, and all 58,808 accepted rows were saved across six parts with contiguous sample indexes.
+
+Both directions requested 1,000 microseconds and Forward_Open returned 1,000 microseconds. The input rate was 980.1 packets per second with a receive p99 of 1,688 microseconds and a longest interval of 29,883 microseconds. There were zero sequence gaps, receive timeouts, or CSV overruns. The scanner skipped 905 scheduled sends and the fixture skipped 1,196. The run confirmed Forward_Close.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

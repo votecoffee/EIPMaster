@@ -18,6 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod field_summary;
+use field_summary::FieldStats;
+pub use field_summary::FieldSummary;
+
 struct Sample {
     elapsed: u64,
     index: u64,
@@ -47,6 +51,7 @@ pub struct Sink {
     pub overrun: AtomicU64,
     pub written: AtomicU64,
     pub error: Mutex<Option<String>>,
+    field_summaries: Mutex<Vec<FieldSummary>>,
     pub prefix: PathBuf,
 }
 pub type Slot = Arc<RwLock<Option<Arc<Sink>>>>;
@@ -62,6 +67,10 @@ impl Sink {
         } else {
             CaptureMode::EveryPacket
         }
+    }
+
+    pub fn field_summaries(&self) -> Vec<FieldSummary> {
+        self.field_summaries.lock().unwrap().clone()
     }
 
     pub fn record(
@@ -188,6 +197,7 @@ impl Capture {
             overrun: 0.into(),
             written: 0.into(),
             error: Mutex::new(None),
+            field_summaries: Mutex::new(Vec::new()),
             prefix,
         });
         let writer = sink.clone();
@@ -250,6 +260,8 @@ impl Part {
 }
 fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Result<()> {
     let mut line = Vec::with_capacity(192);
+    let mut summaries: Vec<_> = sink.fields.iter().map(|_| FieldStats::default()).collect();
+    let mut previous_generation = None;
     let mut number = 1;
     let mut committed = 0;
     loop {
@@ -272,7 +284,8 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                 sample.sequence,
                 sample.cip_sequence,
             )?;
-            for field in &sink.fields {
+            let same_generation = previous_generation == Some(sample.generation);
+            for (field, stats) in sink.fields.iter().zip(&mut summaries) {
                 let value = field
                     .selection
                     .decode(&sample.input[..sink.input_size])
@@ -281,6 +294,7 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                     Value::Text(bytes) => {
                         line.extend_from_slice(b",\"");
                         let text = String::from_utf8_lossy(bytes);
+                        stats.record(&text, value, same_generation);
                         for (index, segment) in text.split('"').enumerate() {
                             if index != 0 {
                                 line.extend_from_slice(b"\"\"");
@@ -289,7 +303,12 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                         }
                         line.push(b'"');
                     }
-                    _ => write!(line, ",{value}")?,
+                    _ => {
+                        let start = line.len() + 1;
+                        write!(line, ",{value}")?;
+                        let text = std::str::from_utf8(&line[start..]).expect("formatted value");
+                        stats.record(text, value, same_generation);
+                    }
                 }
             }
             line.extend_from_slice(b"\r\n");
@@ -309,13 +328,20 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
             part.first_us.get_or_insert(sample.elapsed);
             part.bytes += line.len() as u64;
             part.samples += 1;
+            previous_generation = Some(sample.generation);
             batch += 1;
         }
         if batch != 0 {
             part.file.flush()?;
             sink.written.store(committed + part.samples, Relaxed);
         } else if sink.stop.load(Acquire) && sink.queue.is_empty() {
-            return part.file.flush();
+            part.file.flush()?;
+            *sink.field_summaries.lock().unwrap() = summaries
+                .into_iter()
+                .zip(&sink.fields)
+                .filter_map(|(stats, field)| stats.finish(field))
+                .collect();
+            return Ok(());
         } else {
             thread::sleep(Duration::from_millis(8));
         }
@@ -373,6 +399,12 @@ mod tests {
         capture.stop(&slot);
         assert_eq!(capture.sink.overrun.load(Relaxed), 92);
         assert_eq!(capture.sink.written.load(Relaxed), 8);
+        let summaries = capture.sink.field_summaries();
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].name, "first");
+        assert_eq!(summaries[0].minimum.as_deref(), Some("-5"));
+        assert_eq!(summaries[0].maximum.as_deref(), Some("-5"));
+        assert_eq!(summaries[0].changes_within_generation, 0);
         let mut parts: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -458,6 +490,15 @@ mod tests {
         assert_eq!(capture.sink.unchanged.load(Relaxed), 1);
         assert_eq!(capture.sink.written.load(Relaxed), 3);
         assert_eq!(capture.sink.overrun.load(Relaxed), 0);
+        let summaries = capture.sink.field_summaries();
+        let [summary] = summaries.as_slice() else {
+            panic!("one logged field expected");
+        };
+        assert_eq!(summary.name, "text");
+        assert_eq!(summary.first_value, "a,\"b\n");
+        assert_eq!(summary.last_value, "new");
+        assert!(summary.minimum.is_none() && summary.maximum.is_none());
+        assert_eq!(summary.changes_within_generation, 1);
         let mut files: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -513,6 +554,7 @@ mod tests {
         assert_eq!(capture.sink.written.load(Relaxed), 1);
         assert_eq!(capture.sink.overrun.load(Relaxed), 0);
         assert!(capture.sink.error.lock().unwrap().is_some());
+        assert!(capture.sink.field_summaries().is_empty());
         assert_eq!(fs::read_to_string(&second).unwrap(), "existing file");
         fs::remove_file(first).unwrap();
         fs::remove_file(second).unwrap();

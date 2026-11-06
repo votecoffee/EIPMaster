@@ -121,6 +121,8 @@ Capture stats separate intentionally skipped unchanged packets, sequence gaps, d
 
 For a timed GUI bench run, start CSV capture before connecting. At the end, disconnect and wait for the final connection state, then select **Stop capture and flush** and **Save run report**. The app creates a `-report.toml` file beside the CSV parts. It records the adapter identity, requested and actual intervals, spacing, transport errors, Forward_Close outcome, and CSV counts. Saving a report preserves any file already at that path.
 
+After the CSV writer flushes successfully, the GUI and CLI reports include `field_summaries` for each logged column. Each summary preserves the assembly selection, first and last saved values, and finite numeric minimum and maximum across all CSV parts. It counts changes between adjacent saved rows within each connection generation. Values are stored as text to preserve the CSV cell values and the full range of unsigned integers.
+
 The connection section covers the full lifetime of the latest connection that overlapped the capture. The capture section totals the CSV counts across all parts and records the range of connection generations while CSV was armed. Use one connection per capture when comparing timing across bench trials.
 
 ### CLI

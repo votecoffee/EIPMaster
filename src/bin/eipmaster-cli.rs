@@ -1,5 +1,5 @@
 use assembly_scanner::{
-    capture::{Capture, Slot},
+    capture::{Capture, FieldSummary, Slot},
     eds,
     model::Settings,
     preflight,
@@ -267,6 +267,8 @@ struct Report {
     last_value: Option<String>,
     last_input_hex: Option<String>,
     csv_prefix: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    field_summaries: Vec<FieldSummary>,
     identity_error: Option<String>,
     cip_error: Option<String>,
     network_error: Option<String>,
@@ -552,6 +554,7 @@ fn capture(
             .map(ToString::to_string),
         last_input_hex: last_input.map(|run| assembly_scanner::model::hex(&run.input)),
         csv_prefix: sink.prefix.display().to_string(),
+        field_summaries: sink.field_summaries(),
         identity_error: status.identity_error.clone(),
         cip_error: status.cip_error.clone(),
         network_error: status.network_error.clone(),
