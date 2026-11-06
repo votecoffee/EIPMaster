@@ -5,7 +5,7 @@ use assembly_scanner::{
     preflight,
     scanner::{
         Connection, Identity, IdentityKey, IdentityPin, ReceiveTimeout, Reconnect, Schedule,
-        Spacing, Status, read_identity,
+        SendTiming, Spacing, Status, read_identity,
     },
     settings_file::{self, Preferences},
 };
@@ -255,6 +255,7 @@ struct Report {
     identity: Option<Identity>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
+    send_timing: SendTiming,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attempts: Vec<AttemptReport>,
 }
@@ -289,6 +290,7 @@ struct AttemptReport {
     network_error: Option<String>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
+    send_timing: SendTiming,
 }
 
 #[derive(Default)]
@@ -297,6 +299,7 @@ struct Attempt {
     sent: u64,
     skipped: u64,
     send_spacing: Spacing,
+    send_timing: SendTiming,
 }
 
 impl Attempt {
@@ -305,14 +308,17 @@ impl Attempt {
         let tx = connection.tx.clone();
         let skipped = connection.skipped.clone();
         let send_spacing = connection.tx_spacing.clone();
+        let send_timing = connection.send_timing.clone();
         connection.join();
         let status = status.lock().unwrap().clone();
         let send_spacing = *send_spacing.lock().unwrap();
+        let send_timing = *send_timing.lock().unwrap();
         Self {
             status,
             sent: tx.load(Relaxed),
             skipped: skipped.load(Relaxed),
             send_spacing,
+            send_timing,
         }
     }
 
@@ -333,6 +339,7 @@ impl Attempt {
             network_error: status.network_error.clone(),
             receive_spacing: status.spacing,
             send_spacing: self.send_spacing,
+            send_timing: self.send_timing,
         }
     }
 }
@@ -521,6 +528,7 @@ fn capture(
         identity: status.identity.clone(),
         receive_spacing: status.spacing,
         send_spacing: last.send_spacing,
+        send_timing: last.send_timing,
         attempts: if preferences.auto_reconnect {
             attempts
                 .iter()

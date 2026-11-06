@@ -176,6 +176,30 @@ The scanner skipped 524 send slots and the fixture skipped 1,243. The scan and C
 
 Timeout reports now include the threshold, terminal silence, time since any received UDP datagram, and the last valid sequence when available. The headless CLI tests distinguish a quiet first-input wait from a first-input wait with malformed traffic. The recovery test checks a cyclic watchdog's terminal sequence against its last CSV sample.
 
+## Producer timing and thread priority
+
+The sender records lateness when it reaches a deadline and wall time around the UDP send call. A long call can include time when Windows descheduled the thread. These measurements describe separate points and can come from different packets.
+
+The opt-in deadline mode requests `THREAD_PRIORITY_ABOVE_NORMAL` only for the cyclic producer thread. The sender reports whether Windows accepted the request. [Windows thread scheduling priorities](https://learn.microsoft.com/windows/win32/procthread/scheduling-priorities)
+
+Three alternating pairs ran two concurrent 12-second CLI captures with three-second CSV rotation. Both streams requested and negotiated 1,000 µs in both directions. The primary stream alternated between normal and above-normal deadline scheduling. The peer always used the normal deadline schedule. All twelve captures closed cleanly with zero sequence gaps, watchdog timeouts, or CSV overruns.
+
+| Primary producer priority | Primary missed slots per run | Peer missed slots per run | Primary send p99 range (µs) | Primary maximum send gap (µs) |
+|---|---:|---:|---:|---:|
+| Normal | 5 / 77 / 27 | 7 / 60 / 18 | 1,230–1,412 | 4,325 |
+| Above normal | 2 / 2 / 4 | 61 / 6 / 8 | 1,204–1,335 | 2,859 |
+
+The primary's maximum dispatch lateness was 3,487 µs at normal priority and 1,736 µs at above-normal priority. Its longest UDP call measured 2,695 µs and 1,761 µs, respectively. Peer performance varied between pairs, and the first above-normal trial had 61 peer misses versus seven in its normal-priority pair. Normal priority remains the default.
+
+A separate 60-second run used above-normal priority on the primary and normal priority on the peer. Both requested 1,000 µs and both negotiated 1,000 µs in each direction. Each wrote 59,627 accepted packets to seven CSV parts with zero sequence gaps, watchdog timeouts, or CSV overruns.
+
+| Stream | Missed producer slots | O→T send p50 / p95 / p99 / longest (µs) | T→O receive p50 / p95 / p99 / longest (µs) |
+|---|---:|---:|---:|
+| Above-normal primary | 40 | 1,075 / 1,151 / 1,221 / 3,963 | 1,065 / 1,197 / 1,466 / 4,986 |
+| Normal peer | 320 | 1,073 / 1,186 / 1,479 / 5,174 | 1,063 / 1,217 / 1,638 / 4,710 |
+
+The fixture producers missed 384 and 383 slots, respectively. The primary's worst dispatch lateness was 2,817 µs and its longest UDP send call was 579 µs. The peer recorded 4,612 µs and 2,712 µs, with six send calls lasting at least one RPI. These are headless localhost measurements.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

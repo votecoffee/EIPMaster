@@ -239,6 +239,24 @@ def main():
     assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
     assert report["actual_ot_us"] == report["actual_to_us"] == args.rpi_us
+    timing = report["send_timing"]
+    assert "above_normal_applied" not in timing
+    assert timing["max_dispatch_lateness_us"] >= (args.rpi_us if report["skipped_deadlines"] else 0)
+    assert timing["max_send_call_us"] >= (args.rpi_us if timing["send_calls_at_or_over_rpi"] else 0)
+
+    if sys.platform == "win32":
+        priority = root / "priority.toml"
+        priority.write_text(test_profile(PROFILE) + '\n[app]\nschedule = "deadline_above_normal"\n',
+                            encoding="utf-8")
+        result, adapter = with_adapter(
+            root, "priority", [exe, "capture", priority, root / "priority", "1", "0:12:1"]
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        receipt = tomllib.loads(result.stdout)
+        assert receipt["schedule"] == "deadline_above_normal" and adapter["forward_close"]
+        timing = receipt["send_timing"]
+        assert isinstance(timing["above_normal_applied"], bool)
+        assert timing["max_dispatch_lateness_us"] >= 0 and timing["max_send_call_us"] >= 0
 
     profile = root / "three-fields.toml"
     fields = [
@@ -277,6 +295,8 @@ def main():
     filtered_report = tomllib.loads(filtered.stdout)
     parts = parts_for(Path(filtered_report["csv_prefix"]))
     assert filtered_report["schedule"] == "tokio" and len(parts) >= 2
+    timing = filtered_report["send_timing"]
+    assert "max_dispatch_lateness_us" not in timing and timing["max_send_call_us"] >= 0
     assert read_header(parts[0]) == METADATA + ["counter", "low_bit"]
     changed = list(rows(parts))
     assert len(changed) == filtered_report["written"] > 10 and adapter["forward_close"]

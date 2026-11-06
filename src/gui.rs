@@ -3,7 +3,9 @@ use crate::{
     eds::{self, Profile},
     model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
     preflight,
-    scanner::{self, Connection, Identity, IdentityPin, Reconnect, Schedule, Spacing, Status},
+    scanner::{
+        self, Connection, Identity, IdentityPin, Reconnect, Schedule, SendTiming, Spacing, Status,
+    },
     settings_file::{self, NamedDevice, Preferences, Session, Workspace},
 };
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -127,6 +129,7 @@ struct Device {
     tx: u64,
     skipped: u64,
     tx_spacing: Spacing,
+    send_timing: SendTiming,
     capture: Option<Capture>,
     slot: capture::Slot,
     capturing: bool,
@@ -161,6 +164,7 @@ impl Device {
             tx: 0,
             skipped: 0,
             tx_spacing: Spacing::default(),
+            send_timing: SendTiming::default(),
             capture: None,
             slot: Default::default(),
             capturing: false,
@@ -343,6 +347,7 @@ impl Device {
         self.tx = 0;
         self.skipped = 0;
         self.tx_spacing = Spacing::default();
+        self.send_timing = SendTiming::default();
     }
 
     fn addresses(&self) -> Result<(Ipv4Addr, Ipv4Addr), String> {
@@ -431,6 +436,7 @@ impl Device {
         self.tx = 0;
         self.skipped = 0;
         self.tx_spacing = Spacing::default();
+        self.send_timing = SendTiming::default();
         self.identity_task = None;
         self.connection = Some(connection);
         Ok(())
@@ -477,6 +483,7 @@ impl Device {
             self.tx = c.tx.load(Relaxed);
             self.skipped = c.skipped.load(Relaxed);
             self.tx_spacing = *c.tx_spacing.lock().unwrap();
+            self.send_timing = *c.send_timing.lock().unwrap();
             if finished {
                 let c = self.connection.take().unwrap();
                 self.status = c.status.lock().unwrap().clone();
@@ -577,6 +584,7 @@ impl Device {
         self.stop_capture();
         let spacing = toml::to_string(&self.status.spacing).unwrap_or_default();
         let tx_spacing = toml::to_string(&self.tx_spacing).unwrap_or_default();
+        let send_timing = toml::to_string(&self.send_timing).unwrap_or_default();
         let cip_error = self.status.cip_error.as_deref().unwrap_or_default();
         let network_error = self.status.network_error.as_deref().unwrap_or_default();
         let (ot, to) = self.status.actual.unwrap_or_default();
@@ -607,7 +615,7 @@ impl Device {
             })
             .unwrap_or_default();
         let text = format!(
-            "state = {:?}\nschedule = {:?}\nadapter_ip = {adapter_ip:?}\nidentity_serial = {identity_serial}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
+            "state = {:?}\nschedule = {:?}\nadapter_ip = {adapter_ip:?}\nidentity_serial = {identity_serial}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}\n[send_timing]\n{send_timing}",
             self.status.state,
             format!("{:?}", self.preferences.schedule),
             self.status.valid,
@@ -1306,7 +1314,7 @@ impl Device {
                     ui.small("Use Read identity to verify this device before connecting.");
                 }
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Connect").clicked() {
                     self.connect(reserved_ports);
                 }
@@ -1314,6 +1322,12 @@ impl Device {
                     &mut self.preferences.schedule,
                     Schedule::Deadline,
                     "Deadline",
+                );
+                #[cfg(windows)]
+                ui.selectable_value(
+                    &mut self.preferences.schedule,
+                    Schedule::DeadlineAboveNormal,
+                    "Deadline (above normal)",
                 );
                 ui.selectable_value(
                     &mut self.preferences.schedule,
@@ -1570,6 +1584,22 @@ impl Device {
             "Sent {}  ·  Skipped deadline slots {}",
             self.tx, self.skipped
         ));
+        if self.tx != 0 {
+            ui.small(format!(
+                "Longest UDP send call · {} µs · {} calls at or above O->T interval",
+                self.send_timing.max_send_call_us, self.send_timing.send_calls_at_or_over_rpi
+            ));
+            if let Some(us) = self.send_timing.max_dispatch_lateness_us {
+                ui.small(format!("Maximum producer dispatch lateness · {us} µs"));
+            }
+            if let Some(applied) = self.send_timing.above_normal_applied {
+                ui.small(if applied {
+                    "Producer thread priority · Above normal"
+                } else {
+                    "Producer thread priority · Above-normal request unavailable"
+                });
+            }
+        }
         for (label, s) in [
             ("T->O receive", self.status.spacing),
             ("O->T send", self.tx_spacing),

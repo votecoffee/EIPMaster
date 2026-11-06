@@ -248,7 +248,17 @@ pub struct Status {
 #[serde(rename_all = "snake_case")]
 pub enum Schedule {
     Deadline,
+    DeadlineAboveNormal,
     Tokio,
+}
+
+/// Wall-clock timing measured on the cyclic producer thread.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct SendTiming {
+    pub above_normal_applied: Option<bool>,
+    pub max_dispatch_lateness_us: Option<u64>,
+    pub max_send_call_us: u64,
+    pub send_calls_at_or_over_rpi: u64,
 }
 
 pub struct Connection {
@@ -257,6 +267,7 @@ pub struct Connection {
     pub tx: Arc<AtomicU64>,
     pub skipped: Arc<AtomicU64>,
     pub tx_spacing: Arc<Mutex<Spacing>>,
+    pub send_timing: Arc<Mutex<SendTiming>>,
     clock_origin: Instant,
     latest_input_us: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -338,6 +349,7 @@ impl Connection {
             tx: Arc::new(AtomicU64::new(0)),
             skipped: Arc::new(AtomicU64::new(0)),
             tx_spacing: Arc::new(Mutex::new(Spacing::default())),
+            send_timing: Arc::new(Mutex::new(SendTiming::default())),
             clock_origin: Instant::now(),
             latest_input_us: Arc::new(AtomicU64::new(0)),
         };
@@ -381,6 +393,7 @@ impl Connection {
             tx: connection.tx,
             skipped: connection.skipped,
             tx_spacing: connection.tx_spacing,
+            send_timing: connection.send_timing,
             clock_origin: connection.clock_origin,
             latest_input_us: connection.latest_input_us,
             worker,
@@ -408,6 +421,7 @@ struct Shared {
     tx: Arc<AtomicU64>,
     skipped: Arc<AtomicU64>,
     tx_spacing: Arc<Mutex<Spacing>>,
+    send_timing: Arc<Mutex<SendTiming>>,
     clock_origin: Instant,
     latest_input_us: Arc<AtomicU64>,
 }
@@ -691,6 +705,24 @@ fn run(
     Ok(())
 }
 
+fn request_above_normal() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+        };
+        // SAFETY: The current thread pseudo-handle stays valid for the call.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) != 0 }
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn publish_send_status(shared: &Shared, spacing: &Histogram, timing: SendTiming) {
+    *shared.tx_spacing.lock().unwrap() = spacing.snapshot();
+    *shared.send_timing.lock().unwrap() = timing;
+}
+
 fn produce(
     udp: &UdpSocket,
     peer: SocketAddr,
@@ -715,18 +747,33 @@ fn produce(
     let mut spacing = Histogram::new();
     let mut last = None;
     let mut publish = Instant::now();
-    let mut send = || -> Result<()> {
+    let mut timing = SendTiming {
+        above_normal_applied: (schedule == Schedule::DeadlineAboveNormal)
+            .then(request_above_normal),
+        ..SendTiming::default()
+    };
+    let mut send = |lateness: Option<Duration>| -> Result<()> {
+        if let Some(lateness) = lateness {
+            let us = lateness.as_micros() as u64;
+            timing.max_dispatch_lateness_us =
+                Some(timing.max_dispatch_lateness_us.unwrap_or(0).max(us));
+        }
         sequence = sequence.wrapping_add(1);
         packet[10..14].copy_from_slice(&sequence.to_le_bytes());
         packet[18..20].copy_from_slice(&(sequence as u16).to_le_bytes());
         packet[data_start..].copy_from_slice(&shared.output.lock().unwrap());
-        udp.send_to(&packet, peer)?;
+        let call_start = Instant::now();
+        let result = udp.send_to(&packet, peer);
         let stamp = Instant::now();
+        let call_time = stamp - call_start;
+        timing.max_send_call_us = timing.max_send_call_us.max(call_time.as_micros() as u64);
+        timing.send_calls_at_or_over_rpi += u64::from(call_time >= period);
+        result?;
         if let Some(prior) = last.replace(stamp) {
             spacing.add(stamp - prior);
         }
         if stamp - publish >= Duration::from_millis(100) {
-            *shared.tx_spacing.lock().unwrap() = spacing.snapshot();
+            publish_send_status(shared, &spacing, timing);
             publish = stamp;
         }
         shared.tx.fetch_add(1, Relaxed);
@@ -741,19 +788,22 @@ fn produce(
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !shared.stop.load(Relaxed) {
                 tokio::select! {
-                    _ = interval.tick() => if !shared.stop.load(Relaxed) { send()?; },
+                    _ = interval.tick() => if !shared.stop.load(Relaxed) { send(None)?; },
                     _ = tokio::time::sleep(Duration::from_millis(25)) => {},
                 }
             }
             Ok(())
         });
-        *shared.tx_spacing.lock().unwrap() = spacing.snapshot();
+        publish_send_status(shared, &spacing, timing);
         return result;
     }
     let mut waiter = crate::deadline_wait::DeadlineWait::new();
     let mut deadline = Instant::now();
     let spin = Duration::from_micros(150).min(period / 4);
-    while !shared.stop.load(Relaxed) {
+    let result = loop {
+        if shared.stop.load(Relaxed) {
+            break Ok(());
+        }
         let now = Instant::now();
         if now < deadline {
             let remaining = deadline - now;
@@ -764,17 +814,19 @@ fn produce(
             }
             continue;
         }
-        let missed = (now - deadline).as_nanos() / period.as_nanos();
+        let lateness = now - deadline;
+        let missed = lateness.as_nanos() / period.as_nanos();
         if missed != 0 {
             shared.skipped.fetch_add(missed as u64, Relaxed);
         }
-        deadline = now
-            + (period
-                - Duration::from_nanos(((now - deadline).as_nanos() % period.as_nanos()) as u64));
-        send()?;
-    }
-    *shared.tx_spacing.lock().unwrap() = spacing.snapshot();
-    Ok(())
+        deadline =
+            now + (period - Duration::from_nanos((lateness.as_nanos() % period.as_nanos()) as u64));
+        if let Err(error) = send(Some(lateness)) {
+            break Err(error);
+        }
+    };
+    publish_send_status(shared, &spacing, timing);
+    result
 }
 
 fn parse_packet(
