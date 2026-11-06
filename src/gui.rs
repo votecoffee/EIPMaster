@@ -371,10 +371,33 @@ impl Device {
         (s.device_ip, s.local_ip) = self.addresses()?;
         Ok(s)
     }
+
+    fn begin_identity_read(&mut self) {
+        if self.link_busy() || self.identity_task.is_some() {
+            return;
+        }
+        match self.current() {
+            Ok(cfg) => {
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(scanner::read_identity(&cfg));
+                });
+                self.identity_task = Some(rx);
+                self.bench_confirmed = false;
+                self.writes_confirmed = false;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
     fn connect(&mut self, reserved_ports: &[(Ipv4Addr, u16)]) {
         self.error = None;
         self.notice = None;
         let result = (|| {
+            if self.identity_task.is_some() {
+                return Err("Wait for the identity read to finish".into());
+            }
             let s = self.current()?;
             if s.local_udp_port != 0 && reserved_ports.contains(&(s.local_ip, s.local_udp_port)) {
                 return Err(format!(
@@ -393,15 +416,16 @@ impl Device {
                     );
                 }
             }
-            let pin = if self.preferences.auto_reconnect && s.input_only_without_writes() {
-                Some(self.verified_identity.ok_or(
-                    "Use Read identity and verify the adapter before enabling automatic reconnect",
-                )?)
-            } else {
-                None
-            };
-            self.open_connection(s, pin)?;
-            self.reconnect = pin.map(Reconnect::new);
+            let auto_reconnect = self.preferences.auto_reconnect && s.input_only_without_writes();
+            let pin = self.verified_identity;
+            if auto_reconnect && pin.is_none() {
+                return Err(
+                    "Use Read identity and verify the adapter before enabling automatic reconnect"
+                        .into(),
+                );
+            }
+            self.open_connection(s, pin, self.writes_confirmed)?;
+            self.reconnect = pin.filter(|_| auto_reconnect).map(Reconnect::new);
             Ok(())
         })();
         self.bench_confirmed = false;
@@ -414,15 +438,17 @@ impl Device {
         &mut self,
         settings: Settings,
         pin: Option<IdentityPin>,
+        permit_writes: bool,
     ) -> Result<(), String> {
         let generation = self.generation + 1;
         let schedule = self.preferences.schedule;
         let connection = if let Some(pin) = pin {
-            Connection::start_pinned_input(
+            Connection::start_pinned(
                 settings.clone(),
                 self.slot.clone(),
                 generation,
                 schedule,
+                permit_writes,
                 pin,
             )
         } else {
@@ -431,7 +457,7 @@ impl Device {
                 self.slot.clone(),
                 generation,
                 schedule,
-                self.writes_confirmed,
+                permit_writes,
             )
         }?;
         self.generation = generation;
@@ -515,7 +541,7 @@ impl Device {
             && let Some(pin) = self.reconnect.as_mut().unwrap().take_ready(Instant::now())
         {
             let settings = self.active.as_ref().expect("reconnect settings").clone();
-            match self.open_connection(settings, Some(pin)) {
+            match self.open_connection(settings, Some(pin), false) {
                 Ok(()) => self.notice = Some(format!("Automatic reconnect attempt {attempt} of 3")),
                 Err(error) => {
                     self.reconnect = None;
@@ -532,23 +558,15 @@ impl Device {
                     match result {
                         Ok(identity) => {
                             self.verified_identity = Some(identity.pin());
+                            self.bench_confirmed = false;
+                            self.writes_confirmed = false;
                             self.status.identity = Some(identity);
                             self.status.identity_error = None;
                         }
                         Err(error) => {
-                            self.verified_identity = None;
-                            if self.connection.is_none() {
-                                self.status.identity = None;
-                            }
+                            self.status.identity = None;
                             self.status.identity_error = Some(error);
                         }
-                    }
-                    if let Some(connection) = &self.connection {
-                        let mut status = connection.status.lock().unwrap();
-                        status.identity.clone_from(&self.status.identity);
-                        status
-                            .identity_error
-                            .clone_from(&self.status.identity_error);
                     }
                     self.identity_task = None;
                 }
@@ -1340,8 +1358,20 @@ impl Device {
                     ui.small("Use Read identity to verify this device before connecting.");
                 }
             }
+            if let Some(pin) = self.verified_identity {
+                ui.small(format!(
+                    "Connect checks the verified identity · Serial {:08X}",
+                    pin.serial
+                ));
+            }
+            if self.identity_task.is_some() {
+                ui.small("Reading identity…");
+            }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Connect").clicked() {
+                if ui
+                    .add_enabled(self.identity_task.is_none(), egui::Button::new("Connect"))
+                    .clicked()
+                {
                     self.connect(reserved_ports);
                 }
                 ui.selectable_value(
@@ -1519,22 +1549,15 @@ impl Device {
         }
         if ui
             .add_enabled(
-                self.reconnect_pending().is_none() && self.identity_task.is_none(),
+                !self.link_busy() && self.identity_task.is_none(),
                 egui::Button::new("Read identity"),
+            )
+            .on_disabled_hover_text(
+                "Available after disconnect and once the previous read finishes",
             )
             .clicked()
         {
-            self.verified_identity = None;
-            match self.current() {
-                Ok(cfg) => {
-                    let (tx, rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(scanner::read_identity(&cfg));
-                    });
-                    self.identity_task = Some(rx);
-                }
-                Err(e) => self.error = Some(e),
-            }
+            self.begin_identity_read();
         }
         if let Some(e) = &self.status.identity_error {
             ui.colored_label(AMBER, format!("Identity — {e}"));
@@ -2068,6 +2091,104 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn pending_identity_blocks_connect_and_failed_refresh_keeps_the_pin() {
+        let mut device = Device::new(1, None);
+        let pin = IdentityPin {
+            key: (0, 12, 1),
+            serial: 0x12345678,
+        };
+        device.verified_identity = Some(pin);
+        let (tx, rx) = mpsc::channel();
+        device.identity_task = Some(rx);
+        device.connect(&[]);
+        assert!(device.connection.is_none());
+        assert_eq!(device.generation, 0);
+        assert_eq!(
+            device.error.as_deref(),
+            Some("Wait for the identity read to finish")
+        );
+
+        tx.send(Err("Fixture identity read failed".into())).unwrap();
+        device.poll();
+        assert!(device.identity_task.is_none());
+        assert_eq!(device.verified_identity, Some(pin));
+        assert_eq!(
+            device.status.identity_error.as_deref(),
+            Some("Fixture identity read failed")
+        );
+        device.reset_endpoint_status();
+        assert!(device.verified_identity.is_none());
+    }
+
+    fn read_loopback_owner_identity() -> Device {
+        let mut device = Device::new(1, None);
+        let settings = &mut device.settings;
+        settings.input_only = false;
+        settings.output_instance = 100;
+        settings.output_size = 2;
+        settings.output_hex = "12 34".into();
+        settings.input_run_idle = true;
+        settings.output_run_idle = true;
+        settings.config_size = 3;
+        settings.config_hex = "AA BB CC".into();
+        settings.input_rpi_us = 8000;
+        settings.output_rpi_us = 8000;
+        device.begin_identity_read();
+        device.bench_confirmed = true;
+        device.writes_confirmed = true;
+        poll_until(&mut device, |device| device.identity_task.is_none());
+        assert!(!device.bench_confirmed && !device.writes_confirmed);
+        assert_eq!(
+            device.verified_identity,
+            Some(IdentityPin {
+                key: (0, 12, 1),
+                serial: 0x12345678,
+            })
+        );
+        device
+    }
+
+    #[test]
+    #[ignore = "requires tools/loopback_adapter.py --mode qualify-replacement on localhost"]
+    fn manual_pinned_connection_blocks_a_replacement_before_writes() {
+        let mut device = read_loopback_owner_identity();
+        device.writes_confirmed = true;
+        device.connect(&[]);
+        poll_until(&mut device, |device| !device.link_busy());
+        assert_eq!(device.status.state, "Error");
+        assert_eq!(device.status.identity.as_ref().unwrap().serial, 0x12345679);
+        let error = device.status.identity_error.as_deref().unwrap();
+        assert!(error.contains("Identity mismatch") && error.contains("12345678"));
+        assert!(device.status.actual.is_none());
+        assert_eq!(device.tx, 0);
+    }
+
+    #[test]
+    #[ignore = "requires tools/loopback_adapter.py --mode identity-then-owner on localhost"]
+    fn matching_pin_allows_separately_authorized_owner_connection() {
+        let mut device = read_loopback_owner_identity();
+        device.connect(&[]);
+        assert!(device.connection.is_none());
+        assert!(
+            device
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("output permission")
+        );
+
+        device.writes_confirmed = true;
+        device.connect(&[]);
+        poll_until(&mut device, |device| device.status.valid >= 25);
+        assert!(device.reconnect.is_none());
+        assert!(!device.writes_confirmed);
+        device.disconnect();
+        poll_until(&mut device, |device| !device.link_busy());
+        assert_eq!(device.status.state, "Closed");
+        assert!(device.status.forward_close.as_ref().unwrap().is_confirmed());
     }
 
     #[test]

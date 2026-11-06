@@ -410,12 +410,23 @@ impl Connection {
         schedule: Schedule,
         expected: IdentityPin,
     ) -> std::result::Result<Self, String> {
+        Self::start_pinned(settings, slot, generation, schedule, false, expected)
+    }
+
+    pub fn start_pinned(
+        settings: Settings,
+        slot: Slot,
+        generation: u64,
+        schedule: Schedule,
+        permit_writes: bool,
+        expected: IdentityPin,
+    ) -> std::result::Result<Self, String> {
         Self::start_inner(
             settings,
             slot,
             generation,
             schedule,
-            false,
+            permit_writes,
             Some(ExpectedIdentity::Device(expected)),
         )
     }

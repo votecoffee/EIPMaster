@@ -323,6 +323,19 @@ Two separate 15-second Windows loopback captures requested and negotiated 1,000 
 
 These are loopback socket measurements. The test suite checks all eight codes, legacy profiles, a reserved code, and the negotiated watchdog in the GUI and headless reports.
 
+## GUI identity pinning
+
+Headless GUI backend tests read the adapter identity in a standalone TCP session and then attempted an authorized exclusive-owner connection at the same address. A replacement fixture returned the same model with a different serial number. Its receipt showed identity traffic only, with no Forward_Open or cyclic output.
+
+A matching fixture also verified the write permission gate. The GUI first declined the connection with an identity pin and without write confirmation. After confirmation, it opened at 8 ms, sent the staged test bytes and configuration to the loopback adapter, and confirmed Forward_Close. A unit test covered the pending-read gate and retention of a pin after a failed refresh. The loopback tests also checked that completing the read clears any pending bench and write confirmations.
+
+Start the indicated loopback mode in one terminal. Run the corresponding test filter with `cargo test --locked --release --bin assembly-scanner <filter> -- --ignored` in another terminal.
+
+| Fixture mode | Test filter |
+|---|---|
+| `qualify-replacement` | `manual_pinned_connection_blocks_a_replacement_before_writes` |
+| `identity-then-owner` | `matching_pin_allows_separately_authorized_owner_connection` |
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

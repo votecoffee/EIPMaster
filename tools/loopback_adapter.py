@@ -235,6 +235,7 @@ def main():
         "qualify-replacement", "close-reject", "close-mismatch", "close-short", "close-eof",
         "stall-close-reject", "qualify-close-reject",
         "slow-input", "pause-different-api",
+        "identity-then-owner",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
@@ -254,6 +255,7 @@ def main():
             "qualify": ("normal", "normal", "normal", "normal"),
             "qualify-replacement": ("normal", "normal"),
             "qualify-different-api": ("normal", "different-api", "normal", "normal"),
+            "identity-then-owner": ("normal", "owner"),
             "qualify-close-reject": ("normal", "close-reject"),
         }
         modes = sequences.get(args.mode, (args.mode,))
