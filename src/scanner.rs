@@ -612,6 +612,7 @@ fn produce(
         *shared.tx_spacing.lock().unwrap() = spacing.snapshot();
         return result;
     }
+    let mut waiter = crate::deadline_wait::DeadlineWait::new();
     let mut deadline = Instant::now();
     let spin = Duration::from_micros(150).min(period / 4);
     while !shared.stop.load(Relaxed) {
@@ -619,7 +620,7 @@ fn produce(
         if now < deadline {
             let remaining = deadline - now;
             if remaining > spin {
-                thread::sleep((remaining - spin).min(Duration::from_millis(10)));
+                waiter.wait((remaining - spin).min(Duration::from_millis(10)));
             } else {
                 std::hint::spin_loop();
             }
