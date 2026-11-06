@@ -1,6 +1,7 @@
 """Exercise the console scanner against the independent localhost fixture."""
 
 import argparse
+from itertools import pairwise
 import json
 from pathlib import Path
 import subprocess
@@ -31,6 +32,26 @@ def with_adapter(root, case, command, mode="normal"):
         if adapter.poll() is None:
             adapter.terminate()
             adapter.wait()
+
+
+def check_spacing(capture, samples):
+    receive = capture["receive_spacing"]
+    send = capture["send_spacing"]
+    assert receive["intervals"] == capture["accepted"] - 1
+    assert send["intervals"] == capture["sent"] - 1
+    timestamps = [int(row[1]) for row in samples]
+    assert abs(receive["span_us"] - (timestamps[-1] - timestamps[0])) <= 1
+    intervals = [end - start for start, end in pairwise(timestamps)]
+    for multiple in (2, 4):
+        key = f"intervals_at_or_over_{multiple}x_rpi"
+        threshold = multiple * capture["actual_to_us"]
+        # CSV truncates each elapsed timestamp separately. A difference equal
+        # to the threshold may be on either side before truncation.
+        assert sum(gap > threshold for gap in intervals) <= receive[key] <= sum(
+            gap >= threshold for gap in intervals
+        )
+        assert 0 <= send[key] <= send["intervals"]
+        assert bool(send[key]) == (send["max_us"] >= multiple * capture["actual_ot_us"])
 
 
 def check_qualification(exe, root):
@@ -76,8 +97,7 @@ def check_qualification(exe, root):
             samples = list(rows(parts))
             assert [int(row[2]) for row in samples] == list(range(capture["written"]))
             assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
-            assert (capture["receive_spacing"]["intervals"] == capture["accepted"] - 1
-                    and capture["send_spacing"]["intervals"] == capture["sent"] - 1)
+            check_spacing(capture, samples)
             if case == "interval-mismatch" and index == 1:
                 assert (capture["actual_ot_us"], capture["actual_to_us"]) == (1250, 1500)
                 assert any("Forward_Open intervals differ" in error for error in trial["errors"])
@@ -239,6 +259,7 @@ def main():
     assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
     assert report["actual_ot_us"] == report["actual_to_us"] == args.rpi_us
+    check_spacing(report, samples)
     timing = report["send_timing"]
     assert "above_normal_applied" not in timing
     assert timing["max_dispatch_lateness_us"] >= (args.rpi_us if report["skipped_deadlines"] else 0)

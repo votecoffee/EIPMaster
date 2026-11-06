@@ -133,15 +133,22 @@ impl Reconnect {
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct Spacing {
     pub intervals: u64,
+    pub span_us: u64,
     pub p50_us: u64,
     pub p95_us: u64,
     pub p99_us: u64,
     pub max_us: u64,
+    pub intervals_at_or_over_2x_rpi: u64,
+    pub intervals_at_or_over_4x_rpi: u64,
 }
 struct Histogram {
     bins: Vec<u64>,
+    rpi_us: u64,
     count: u64,
+    span: Duration,
     max: u64,
+    at_or_over_2x: u64,
+    at_or_over_4x: u64,
 }
 impl Histogram {
     // Exact microsecond buckets through 32,767 µs, then 256 buckets per doubling.
@@ -152,11 +159,15 @@ impl Histogram {
     const TOTAL_BINS: usize =
         Self::EXACT_BINS + (u64::BITS - Self::EXACT_BITS) as usize * Self::BINS_PER_OCTAVE;
 
-    fn new() -> Self {
+    fn new(actual_rpi_us: u32) -> Self {
         Self {
             bins: vec![0; Self::TOTAL_BINS],
+            rpi_us: u64::from(actual_rpi_us),
             count: 0,
+            span: Duration::ZERO,
             max: 0,
+            at_or_over_2x: 0,
+            at_or_over_4x: 0,
         }
     }
     fn bucket(us: u64) -> usize {
@@ -184,7 +195,10 @@ impl Histogram {
         let us = gap.as_micros().min(u64::MAX.into()) as u64;
         self.bins[Self::bucket(us)] += 1;
         self.count += 1;
+        self.span += gap;
         self.max = self.max.max(us);
+        self.at_or_over_2x += u64::from(us >= self.rpi_us * 2);
+        self.at_or_over_4x += u64::from(us >= self.rpi_us * 4);
     }
     fn snapshot(&self) -> Spacing {
         let mut values = [0; 3];
@@ -203,10 +217,13 @@ impl Histogram {
         }
         Spacing {
             intervals: self.count,
+            span_us: self.span.as_micros().min(u64::MAX.into()) as u64,
             p50_us: values[0],
             p95_us: values[1],
             p99_us: values[2],
             max_us: self.max,
+            intervals_at_or_over_2x_rpi: self.at_or_over_2x,
+            intervals_at_or_over_4x_rpi: self.at_or_over_4x,
         }
     }
 }
@@ -744,7 +761,7 @@ fn produce(
         packet[20] = 1;
     }
     let mut sequence = 0u32;
-    let mut spacing = Histogram::new();
+    let mut spacing = Histogram::new(reply.o_to_t_actual_rpi_us);
     let mut last = None;
     let mut publish = Instant::now();
     let mut timing = SendTiming {
@@ -914,7 +931,7 @@ fn receive(
     let mut last_udp = None;
     let mut seen = 0u64;
     let mut status = shared.status.lock().unwrap().clone();
-    let mut spacing = Histogram::new();
+    let mut spacing = Histogram::new(reply.t_to_o_actual_rpi_us);
     let mut publish = started;
     let result = loop {
         if shared.stop.load(Relaxed) {
@@ -1014,7 +1031,7 @@ mod tests {
 
     #[test]
     fn spacing_reports_short_intervals_exactly_and_bounds_long_percentiles() {
-        let mut histogram = Histogram::new();
+        let mut histogram = Histogram::new(1_000);
         for (us, count) in [(1_001, 50), (30_000, 45), (2_000_000, 4), (5_000_000, 1)] {
             for _ in 0..count {
                 histogram.add(Duration::from_micros(us));
@@ -1027,13 +1044,27 @@ mod tests {
         assert!((2_000_000..=2_008_000).contains(&summary.p99_us));
         assert_eq!(summary.max_us, 5_000_000);
 
-        let mut edge = Histogram::new();
+        let mut edge = Histogram::new(1_000);
         edge.add(Duration::from_micros(32_768));
         assert_eq!(edge.snapshot().p99_us, 32_768);
         edge.add(Duration::from_micros(u64::MAX));
         let summary = edge.snapshot();
         assert_eq!(summary.p99_us, u64::MAX);
         assert_eq!(summary.max_us, u64::MAX);
+    }
+
+    #[test]
+    fn spacing_counts_long_intervals_against_the_actual_rpi_and_preserves_span() {
+        let mut histogram = Histogram::new(1_250);
+        assert_eq!(histogram.snapshot().span_us, 0);
+        for ns in [2_499_999, 2_500_000, 4_999_999, 5_000_000] {
+            histogram.add(Duration::from_nanos(ns));
+        }
+        let summary = histogram.snapshot();
+        assert_eq!(summary.intervals, 4);
+        assert_eq!(summary.span_us, 14_999);
+        assert_eq!(summary.intervals_at_or_over_2x_rpi, 3);
+        assert_eq!(summary.intervals_at_or_over_4x_rpi, 1);
     }
 
     #[test]

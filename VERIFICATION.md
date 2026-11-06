@@ -216,6 +216,19 @@ All accepted rows reached disk with contiguous sample indexes and zero buffer ov
 python tools/test_interrupt.py .\target\release\eipmaster-cli.exe .\.local\interrupt-check
 ```
 
+## Packet span and long intervals
+
+A headless 60-second Windows loopback capture requested 1,000 microseconds in both directions. Forward_Open returned 1,000 microseconds in both directions. The capture closed cleanly and wrote all 58,770 accepted rows across seven CSV parts with contiguous sample indexes, zero receive sequence gaps, zero watchdog timeouts, and zero CSV overruns.
+
+| Socket measurement | Observed span (s) | p50 / p95 / p99 / longest (microseconds) | Intervals at or above 2x / 4x actual RPI |
+|---|---:|---:|---:|
+| O-to-T send | 60.013080 | 1,022 / 1,326 / 1,825 / 15,697 | 492 / 86 |
+| T-to-O receive | 60.013486 | 1,007 / 1,288 / 1,810 / 20,479 | 481 / 92 |
+
+The scanner skipped 1,128 scheduled sends and the fixture skipped 1,244. Both skip slots before assigning a sequence. The long-interval counts describe socket timing even when the sequence is contiguous. The 4x counts are included in the 2x counts.
+
+The 8 ms and 1 ms CLI checks cross-checked the receive span and long-interval counts against CSV timestamps. The qualification regression also checked a fixture returning 1,250 microseconds O-to-T and 1,500 microseconds T-to-O for a 1,000-microsecond request. The thresholds follow the actual interval for each direction. The CSV comparison allows for sub-microsecond truncation at the interval boundaries.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

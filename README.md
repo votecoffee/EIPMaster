@@ -115,7 +115,9 @@ big_endian = false
 
 Set either rotation limit to zero to disable it. Each part has the same UTF-8 CSV header. Keep capture armed during a reconnect to retain the UTC origin and sample index. The generation column marks the new connection. Select **Stop capture and flush** to drain the queue.
 
-The live panel separates requested RPIs, Forward_Open actual intervals and socket timing. Spacing percentiles use exact microsecond buckets through 32,767 µs and round longer values up by less than 0.4%. The longest gap is measured directly. Capture stats separate intentionally skipped unchanged packets, sequence gaps, duplicates, late and invalid packets, sender deadline skips, local buffer overruns and disk errors. The device panel shows the terminal silence and threshold when valid input times out. A local overrun leaves a gap in the sample indexes. The queue reserves space up front for packet snapshots. Increasing its sample capacity increases memory use.
+The live panel separates requested RPIs, Forward_Open actual intervals and socket timing. Spacing percentiles use exact microsecond buckets through 32,767 µs and round longer values up by less than 0.4%. The longest gap is measured directly. Within each connection attempt, each direction reports the elapsed span from its first to its last packet and counts observed intervals at or above two and four times its Forward_Open interval. The four-times count is also included in the two-times count. These counters describe socket timing and are separate from sequence gaps and CSV loss. Terminal watchdog silence is reported separately.
+
+Capture stats separate intentionally skipped unchanged packets, sequence gaps, duplicates, late and invalid packets, sender deadline skips, local buffer overruns and disk errors. The device panel shows the terminal silence and threshold when valid input times out. A local overrun leaves a gap in the sample indexes. The queue reserves space up front for packet snapshots. Increasing its sample capacity increases memory use.
 
 ### CLI
 

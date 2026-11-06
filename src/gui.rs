@@ -1611,6 +1611,12 @@ impl Device {
                 "{label} spacing in µs  ·  p50 {}  ·  p95 {}  ·  p99 {}  ·  longest {}",
                 s.p50_us, s.p95_us, s.p99_us, s.max_us
             ));
+            ui.small(format!(
+                "Observed span {:.3} s  ·  {} intervals ≥2× negotiated RPI  ·  {} ≥4×",
+                s.span_us as f64 / 1_000_000.0,
+                s.intervals_at_or_over_2x_rpi,
+                s.intervals_at_or_over_4x_rpi
+            ));
         }
         ui.separator();
         title(ui, "04", "Input assembly");
