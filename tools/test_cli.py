@@ -35,6 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=Path)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--rpi-us", type=int, choices=(1000, 8000), default=8000)
     args = parser.parse_args()
     exe = args.exe.resolve()
     root = args.directory.resolve()
@@ -52,7 +53,12 @@ def main():
     assert tomllib.loads(identity.stdout)["identity"]["name"] == "Loopback Adapter"
     assert "ot_requested_us" not in adapter
 
-    capture = [exe, "capture", PROFILE]
+    def test_profile(path):
+        return path.read_text(encoding="utf-8").replace("rpi_us = 1000", f"rpi_us = {args.rpi_us}")
+
+    legacy = root / "legacy.toml"
+    legacy.write_text(test_profile(PROFILE), encoding="utf-8")
+    capture = [exe, "capture", legacy]
     mismatch, adapter = with_adapter(root, "mismatch", [*capture, root / "mismatch", "1", "0:12:99"])
     assert mismatch.returncode == 1
     assert "Identity mismatch" in tomllib.loads(mismatch.stdout)["identity_error"]
@@ -72,7 +78,7 @@ def main():
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
     assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
-    assert report["actual_ot_us"] == report["actual_to_us"] == 1000
+    assert report["actual_ot_us"] == report["actual_to_us"] == args.rpi_us
 
     profile = root / "three-fields.toml"
     fields = [
@@ -80,13 +86,13 @@ def main():
         ("first_word", 0, "U16", True),
         ("high_byte", 3, "U8", False),
     ]
-    text = PROFILE.read_text(encoding="utf-8")
+    text = test_profile(PROFILE)
     for name, offset, kind, big_endian in fields:
         text += (f'\n[[capture_fields]]\nname = "{name}"\n[capture_fields.selection]\n'
                  f'offset = {offset}\nkind = "{kind}"\nbig_endian = {str(big_endian).lower()}\n')
     profile.write_text(text, encoding="utf-8")
     multi, adapter = with_adapter(
-        root, "three-fields", [exe, "capture", profile, root / "three-fields", "1", "0:12:1"]
+        root, "three-fields", [exe, "capture", profile, root / "three-fields", "2", "0:12:1"]
     )
     assert multi.returncode == 0, (multi.stdout, multi.stderr)
     multi_report = tomllib.loads(multi.stdout)
@@ -100,9 +106,10 @@ def main():
         payload = expected.to_bytes(4, "little")
         assert list(map(int, row[6:])) == [expected, int.from_bytes(payload[:2], "big"), payload[3]]
 
-    mapped = PROFILE.with_name("mapped-loopback.toml")
+    mapped = root / "mapped.toml"
+    mapped.write_text(test_profile(PROFILE.with_name("mapped-loopback.toml")), encoding="utf-8")
     filtered, adapter = with_adapter(
-        root, "on-change", [exe, "capture", mapped, root / "on-change", "2", "0:12:1"]
+        root, "on-change", [exe, "capture", mapped, root / "on-change", "3", "0:12:1"]
     )
     assert filtered.returncode == 0, (filtered.stdout, filtered.stderr)
     filtered_report = tomllib.loads(filtered.stdout)

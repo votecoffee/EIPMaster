@@ -110,6 +110,7 @@ To exercise a custom profile against a localhost fixture, pass its TOML file as 
 ## Verification
 
 Run the Rust tests and the loopback harness on Windows. The [verification notes](VERIFICATION.md) describe the upstream crate review, simulator timing and physical acceptance procedure.
+The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exercise the same cases at 1 ms.
 
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --locked --release
