@@ -1,5 +1,6 @@
 use crate::model::{Settings, hex};
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct Profile {
@@ -8,6 +9,11 @@ pub struct Profile {
     pub fields: BTreeMap<&'static str, String>,
     pub settings: Settings,
     pub unsupported: Vec<String>,
+}
+
+pub fn load(path: &Path) -> Result<Vec<Profile>, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    parse(&String::from_utf8_lossy(&bytes))
 }
 fn fields(text: &str) -> Vec<String> {
     let mut result = Vec::new();

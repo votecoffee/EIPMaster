@@ -1,5 +1,6 @@
 use assembly_scanner::{
     capture::{Capture, Options, Slot},
+    eds,
     model::Settings,
     scanner::{Connection, Identity, IdentityKey, Spacing, read_identity},
 };
@@ -18,6 +19,7 @@ use std::{
 
 const USAGE: &str = "\
 Usage:
+  eipmaster-cli eds <vendor.eds>
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
   eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product>
 
@@ -38,6 +40,25 @@ fn main() -> ExitCode {
 
 fn run(args: &[OsString]) -> Result<bool, String> {
     match args {
+        [command, path] if command == "eds" => {
+            let result = EdsReport {
+                profiles: eds::load(Path::new(path))?
+                    .into_iter()
+                    .map(|p| EdsProfile {
+                        id: p.id,
+                        name: p.name,
+                        supported: p.unsupported.is_empty(),
+                        unsupported: p.unsupported,
+                        fields: p.fields,
+                    })
+                    .collect(),
+            };
+            print!(
+                "{}",
+                toml::to_string_pretty(&result).map_err(|e| e.to_string())?
+            );
+            Ok(true)
+        }
         [command, adapter, local] if command == "identity" => {
             let settings = Settings {
                 device_ip: adapter
@@ -100,6 +121,20 @@ fn parse_identity_key(value: &str) -> Result<IdentityKey, String> {
 }
 
 #[derive(Serialize)]
+struct EdsReport {
+    profiles: Vec<EdsProfile>,
+}
+
+#[derive(Serialize)]
+struct EdsProfile {
+    id: String,
+    name: String,
+    supported: bool,
+    unsupported: Vec<String>,
+    fields: std::collections::BTreeMap<&'static str, String>,
+}
+
+#[derive(Serialize)]
 struct IdentityReport {
     adapter_ip: std::net::Ipv4Addr,
     local_ip: std::net::Ipv4Addr,
@@ -128,6 +163,7 @@ struct Report {
     sent: u64,
     skipped_deadlines: u64,
     seen: u64,
+    unchanged: u64,
     written: u64,
     buffer_overruns: u64,
     last_value: Option<String>,
@@ -154,6 +190,7 @@ fn capture(
     if !settings.input_only || settings.config_size != 0 || settings.output_run_idle {
         return Err("Capture requires an input-only heartbeat with zero configuration bytes and O->T Run/Idle disabled".into());
     }
+    settings.csv_fields()?;
     fs::create_dir(directory).map_err(|e| {
         format!(
             "Cannot create new capture directory {}: {e}",
@@ -238,6 +275,7 @@ fn capture(
         sent: tx.load(Relaxed),
         skipped_deadlines: skipped.load(Relaxed),
         seen: sink.seen.load(Relaxed),
+        unchanged: sink.unchanged.load(Relaxed),
         written: sink.written.load(Relaxed),
         buffer_overruns: sink.overrun.load(Relaxed),
         last_value: status.value.map(|v| v.to_string()),
@@ -261,6 +299,6 @@ fn capture(
     Ok(report.state == "Closed"
         && report.duration_reached
         && report.written != 0
-        && report.written == report.accepted
+        && report.written + report.unchanged == report.accepted
         && report.disk_error.is_none())
 }

@@ -1,14 +1,14 @@
 use crate::{
     capture::{self, Capture},
     eds::{self, Profile},
-    model::{self, Kind, Settings},
+    model::{self, ByteSwap, CaptureField, CaptureMode, Kind, Selection, Settings},
     scanner::{self, Connection, Identity, Schedule, Spacing, Status},
 };
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::{
     fs,
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering::Relaxed, mpsc},
     time::{Duration, Instant},
 };
@@ -84,6 +84,7 @@ struct App {
     selected: Option<usize>,
     bench_confirmed: bool,
     writes_confirmed: bool,
+    output_entries: Vec<String>,
     connection: Option<Connection>,
     active: Option<Settings>,
     status: Status,
@@ -116,6 +117,7 @@ impl App {
             selected: None,
             bench_confirmed: false,
             writes_confirmed: false,
+            output_entries: Vec::new(),
             connection: None,
             active: None,
             status: Status::default(),
@@ -158,7 +160,18 @@ impl App {
                 app.settings.output_size = 2;
                 app.settings.output_run_idle = true;
                 app.settings.input_run_idle = true;
-                app.settings.output_hex = "12 34".into();
+                app.settings.output_hex = "00 00".into();
+                app.settings.output_fields = vec![CaptureField {
+                    name: "test_word".into(),
+                    selection: Selection {
+                        kind: Kind::U16,
+                        big_endian: true,
+                        ..Selection::default()
+                    },
+                }];
+                app.settings
+                    .stage_output(0, "4660")
+                    .expect("fixture output mapping");
                 app.settings.config_size = 3;
                 app.settings.config_hex = "AA BB CC".into();
                 app.writes_confirmed = true;
@@ -265,6 +278,7 @@ impl App {
                 let c = self.connection.take().unwrap();
                 self.status = c.status.lock().unwrap().clone();
                 c.join();
+                self.writes_confirmed = false;
             }
         }
         if let Some(task) = &self.identity_task {
@@ -295,7 +309,11 @@ impl App {
         if bench.started.elapsed() >= Duration::from_secs(4) && !bench.transitioned {
             if bench.owner && self.status.state == "Receiving" {
                 if let Some(c) = &self.connection {
-                    *c.output.lock().unwrap() = vec![0x56, 0x78];
+                    self.settings
+                        .stage_output(0, "22136")
+                        .expect("fixture output mapping");
+                    *c.output.lock().unwrap() =
+                        self.settings.output().expect("fixture output bytes");
                 }
                 bench.transitioned = true;
             } else if bench.reconnect && self.generation == 1 {
@@ -331,13 +349,14 @@ impl App {
             |s| (s.output_rpi_us, s.input_rpi_us),
         );
         let setup_error = self.error.as_deref().unwrap_or_default();
-        let (seen, written, overrun, disk_error) = self
+        let (seen, unchanged, written, overrun, disk_error) = self
             .capture
             .as_ref()
             .map(|capture| {
                 let s = &capture.sink;
                 (
                     s.seen.load(Relaxed),
+                    s.unchanged.load(Relaxed),
                     s.written.load(Relaxed),
                     s.overrun.load(Relaxed),
                     s.error.lock().unwrap().clone(),
@@ -345,7 +364,7 @@ impl App {
             })
             .unwrap_or_default();
         let text = format!(
-            "state = {:?}\nschedule = {:?}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
+            "state = {:?}\nschedule = {:?}\nrequested_ot_us = {requested_ot}\nrequested_to_us = {requested_to}\nactual_ot_us = {ot}\nactual_to_us = {to}\nvalid = {}\ngaps = {}\nduplicates = {}\nlate = {}\ninvalid = {}\ntimeouts = {}\ntx = {}\nskipped_deadlines = {}\nseen = {seen}\nunchanged = {unchanged}\nwritten = {written}\noverruns = {overrun}\ndisk_error = {}\ngenerations = {}\ncip_error = {cip_error:?}\nnetwork_error = {network_error:?}\nsetup_error = {setup_error:?}\n\n[spacing]\n{spacing}\n[tx_spacing]\n{tx_spacing}",
             self.status.state,
             format!("{:?}", self.schedule),
             self.status.valid,
@@ -436,6 +455,128 @@ fn number<T: egui::emath::Numeric>(ui: &mut Ui, label: &str, value: &mut T) {
     ui.add(egui::DragValue::new(value).speed(0.25));
     ui.end_row();
 }
+
+fn edit_selection(ui: &mut Ui, selection: &mut Selection) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Byte offset");
+        ui.add(egui::DragValue::new(&mut selection.offset));
+        egui::ComboBox::from_id_salt("field-kind")
+            .selected_text(format!("{:?}", selection.kind))
+            .show_ui(ui, |ui| {
+                for kind in Kind::ALL {
+                    ui.selectable_value(&mut selection.kind, kind, format!("{kind:?}"));
+                }
+            });
+        if selection.kind == Kind::Utf8 {
+            selection.bit = None;
+            selection.swap = ByteSwap::None;
+            ui.label("Text bytes");
+            ui.add(
+                egui::DragValue::new(selection.string_length.get_or_insert(1))
+                    .range(1..=model::MAX_ASSEMBLY_BYTES),
+            );
+        } else {
+            selection.string_length = None;
+            let mut bit = selection.bit.is_some();
+            if ui.checkbox(&mut bit, "Single bit").changed() {
+                selection.bit = bit.then_some(0);
+            }
+            if let Some(bit) = &mut selection.bit {
+                selection.swap = ByteSwap::None;
+                ui.add(egui::DragValue::new(bit).range(0..=7));
+            } else if !matches!(selection.kind, Kind::Bool | Kind::U8 | Kind::I8) {
+                let wide = !matches!(selection.kind, Kind::U16 | Kind::I16);
+                if !wide && selection.swap == ByteSwap::WordOrder {
+                    selection.swap = ByteSwap::None;
+                }
+                ui.checkbox(&mut selection.big_endian, "Big endian");
+                egui::ComboBox::from_id_salt("field-swap")
+                    .selected_text(selection.swap.label())
+                    .show_ui(ui, |ui| {
+                        for swap in ByteSwap::ALL {
+                            if wide || swap != ByteSwap::WordOrder {
+                                ui.selectable_value(&mut selection.swap, swap, swap.label());
+                            }
+                        }
+                    });
+            } else {
+                selection.swap = ByteSwap::None;
+            }
+        }
+    });
+}
+
+fn edit_fields(
+    ui: &mut Ui,
+    direction: &str,
+    fields: &mut Vec<CaptureField>,
+    mut logged: Option<&mut Vec<String>>,
+    size: u16,
+) -> bool {
+    let mut remove = None;
+    for (index, field) in fields.iter_mut().enumerate() {
+        ui.push_id((direction, index), |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                let previous = field.name.clone();
+                if ui.text_edit_singleline(&mut field.name).changed()
+                    && let Some(names) = logged.as_deref_mut()
+                {
+                    for name in names.iter_mut().filter(|name| **name == previous) {
+                        name.clone_from(&field.name);
+                    }
+                }
+                if let Some(names) = logged.as_deref_mut() {
+                    let mut included = names.contains(&field.name);
+                    if ui.checkbox(&mut included, "CSV").changed() {
+                        if included {
+                            names.push(field.name.clone());
+                        } else {
+                            names.retain(|name| name != &field.name);
+                        }
+                    }
+                }
+                if ui.small_button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+            edit_selection(ui, &mut field.selection);
+            if let Err(error) = field.selection.validate(usize::from(size)) {
+                ui.colored_label(RED, error);
+            }
+            ui.separator();
+        });
+    }
+    if let Some(index) = remove {
+        let field = fields.remove(index);
+        if let Some(names) = logged {
+            names.retain(|name| name != &field.name);
+        }
+        return true;
+    }
+    if fields.len() < model::MAX_MAPPED_FIELDS
+        && ui.button(format!("Add {direction} field")).clicked()
+    {
+        let name = (1..)
+            .map(|n| format!("{direction}_{n}"))
+            .find(|name| {
+                !fields
+                    .iter()
+                    .any(|field| field.name.eq_ignore_ascii_case(name))
+            })
+            .unwrap();
+        fields.push(CaptureField {
+            name,
+            selection: Selection {
+                kind: Kind::U8,
+                ..Selection::default()
+            },
+        });
+        return true;
+    }
+    false
+}
+
 impl App {
     fn setup(&mut self, ui: &mut Ui) {
         let online = self.connection.is_some();
@@ -453,6 +594,8 @@ impl App {
                             self.local = settings.local_ip.to_string();
                             self.settings = settings;
                             self.selected = None;
+                            self.output_entries.clear();
+                            self.writes_confirmed = false;
                             self.error = None;
                         }
                         Err(e) => self.error = Some(e),
@@ -477,8 +620,7 @@ impl App {
                 ui.label("EDS file");
                 ui.text_edit_singleline(&mut self.eds_path);
                 if ui.button("Import").clicked() {
-                    match fs::read(&self.eds_path).map_err(|e| e.to_string())
-                        .and_then(|bytes| eds::parse(&String::from_utf8_lossy(&bytes))) {
+                    match eds::load(Path::new(&self.eds_path)) {
                         Ok(profiles) => {
                             self.profiles = profiles;
                             self.select_profile(Some(self.profiles.iter().position(|p| p.settings.input_only && p.unsupported.is_empty()).unwrap_or(0)));
@@ -510,11 +652,24 @@ impl App {
                 for issue in &p.unsupported { ui.colored_label(AMBER, issue); }
             }
             egui::Grid::new("network").num_columns(2).show(ui, |ui| {
-                ui.label("Adapter IPv4"); ui.text_edit_singleline(&mut self.device); ui.end_row();
-                ui.label("Local NIC IPv4"); ui.text_edit_singleline(&mut self.local); ui.end_row();
+                ui.label("Adapter IPv4");
+                let device_changed = ui.text_edit_singleline(&mut self.device).changed();
+                ui.end_row();
+                ui.label("Local NIC IPv4");
+                let local_changed = ui.text_edit_singleline(&mut self.local).changed();
+                ui.end_row();
+                if device_changed || local_changed {
+                    self.bench_confirmed = false;
+                    self.writes_confirmed = false;
+                }
                 number(ui, "Local UDP port (0 = automatic)", &mut self.settings.local_udp_port);
             });
             let s = &mut self.settings;
+            let write_settings = |s: &Settings| (
+                s.input_only, s.output_instance, s.output_size, s.output_run_idle,
+                s.config_instance, s.config_size,
+            );
+            let before = write_settings(s);
             ui.separator();
             ui.checkbox(&mut s.input_only, "Input-only heartbeat profile");
             egui::Grid::new("assembly").num_columns(3).striped(true).show(ui, |ui| {
@@ -546,26 +701,63 @@ impl App {
                 ui.label("Bytes"); ui.add(egui::DragValue::new(&mut s.config_size));
             });
             ui.label("Configuration hex bytes (sent in Forward_Open)");
-            ui.add(egui::TextEdit::multiline(&mut s.config_hex).desired_rows(1).desired_width(f32::INFINITY).code_editor());
-            title(ui, "02", if s.capture_fields.is_empty() { "Value to capture" } else { "Primary readback" });
-            let selection = &mut s.selection;
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Byte offset");
-                ui.add(egui::DragValue::new(&mut selection.offset));
-                let mut bit = selection.bit.is_some();
-                if ui.checkbox(&mut bit, "Single bit").changed() { selection.bit = bit.then_some(0); }
-                if let Some(bit) = &mut selection.bit { ui.add(egui::DragValue::new(bit).range(0..=7)); }
-                else {
-                    egui::ComboBox::from_id_salt("value-kind").selected_text(format!("{:?}", selection.kind)).show_ui(ui, |ui| {
-                        for kind in Kind::ALL { ui.selectable_value(&mut selection.kind, kind, format!("{kind:?}")); }
-                    });
-                    ui.checkbox(&mut selection.big_endian, "Big endian");
+            if ui.add(egui::TextEdit::multiline(&mut s.config_hex).desired_rows(1).desired_width(f32::INFINITY).code_editor()).changed()
+                || before != write_settings(s)
+            {
+                self.writes_confirmed = false;
+            }
+            title(ui, "02", "Assembly mappings");
+            ui.collapsing("Primary input readback", |ui| {
+                edit_selection(ui, &mut s.selection);
+                if let Err(e) = s.selection.validate(s.input_size as usize) {
+                    ui.colored_label(RED, e);
                 }
             });
-            if let Err(e) = selection.validate(s.input_size as usize) { ui.colored_label(RED, e); }
-            if !s.capture_fields.is_empty() {
-                let names = s.capture_fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>();
-                ui.small(format!("CSV fields from settings: {}", names.join(", ")));
+            ui.collapsing("Named inputs and CSV selection", |ui| {
+                let mut all = s.log_fields.is_none();
+                if ui.checkbox(&mut all, "Log all mapped inputs").changed() {
+                    s.log_fields = if all { None } else if s.capture_fields.is_empty() {
+                        Some(vec!["value".into()])
+                    } else {
+                        Some(s.capture_fields.iter().map(|field| field.name.clone()).collect())
+                    };
+                }
+                let had_fields = !s.capture_fields.is_empty();
+                if !had_fields {
+                    ui.small("With no named inputs, CSV uses the primary readback.");
+                    if let Some(names) = &mut s.log_fields {
+                        let mut included = names.iter().any(|name| name == "value");
+                        if ui.checkbox(&mut included, "Log primary value").changed() {
+                            *names = if included { vec!["value".into()] } else { Vec::new() };
+                        }
+                    }
+                }
+                edit_fields(ui, "input", &mut s.capture_fields, s.log_fields.as_mut(), s.input_size);
+                if had_fields == s.capture_fields.is_empty() {
+                    if let Some(names) = &mut s.log_fields {
+                        *names = if s.capture_fields.is_empty() { vec!["value".into()] }
+                            else { s.capture_fields.iter().map(|field| field.name.clone()).collect() };
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("CSV rows");
+                    ui.selectable_value(&mut s.capture_mode, CaptureMode::EveryPacket, "Every packet");
+                    ui.selectable_value(&mut s.capture_mode, CaptureMode::OnChange, "On change");
+                });
+                match s.csv_fields() {
+                    Ok(fields) => {
+                        let names = fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>();
+                        ui.small(format!("CSV columns · {}", names.join(", ")));
+                    }
+                    Err(e) => { ui.colored_label(AMBER, e); }
+                }
+            });
+            if !s.input_only {
+                ui.collapsing("Named output mappings", |ui| {
+                    if edit_fields(ui, "output", &mut s.output_fields, None, s.output_size) {
+                        self.output_entries.clear();
+                    }
+                });
             }
         });
         if online || self.capturing {
@@ -573,21 +765,36 @@ impl App {
         }
         ui.separator();
         ui.label("Staged output hex bytes");
-        ui.add_enabled(
-            !self.settings.input_only,
-            egui::TextEdit::multiline(&mut self.settings.output_hex)
-                .desired_rows(1)
-                .desired_width(f32::INFINITY)
-                .code_editor(),
-        );
+        if ui
+            .add_enabled(
+                !self.settings.input_only,
+                egui::TextEdit::multiline(&mut self.settings.output_hex)
+                    .desired_rows(1)
+                    .desired_width(f32::INFINITY)
+                    .code_editor(),
+            )
+            .changed()
+        {
+            self.writes_confirmed = false;
+        }
+        self.typed_outputs(ui);
         if let Some(c) = &self.connection {
+            if !self.settings.input_only {
+                ui.checkbox(
+                    &mut self.writes_confirmed,
+                    "These staged output bytes are authorized",
+                );
+            }
             if ui
                 .add_enabled(
-                    !self.settings.input_only && self.status.state == "Receiving",
+                    !self.settings.input_only
+                        && self.status.state == "Receiving"
+                        && self.writes_confirmed,
                     egui::Button::new("Apply staged outputs"),
                 )
                 .clicked()
             {
+                self.writes_confirmed = false;
                 match self.settings.output() {
                     Ok(bytes) => {
                         *c.output.lock().unwrap() = bytes;
@@ -652,15 +859,66 @@ impl App {
     }
     fn select_profile(&mut self, i: Option<usize>) {
         self.selected = i;
+        self.writes_confirmed = false;
+        self.output_entries.clear();
         if let Some(i) = i {
-            let selection = self.settings.selection;
-            let fields = self.settings.capture_fields.clone();
-            let port = self.settings.local_udp_port;
-            self.settings = self.profiles[i].settings.clone();
-            self.settings.selection = selection;
-            self.settings.capture_fields = fields;
-            self.settings.local_udp_port = port;
+            let mut settings = self.profiles[i].settings.clone();
+            settings.selection = self.settings.selection;
+            settings.capture_fields = std::mem::take(&mut self.settings.capture_fields);
+            settings.output_fields = std::mem::take(&mut self.settings.output_fields);
+            settings.log_fields = self.settings.log_fields.take();
+            settings.capture_mode = self.settings.capture_mode;
+            settings.local_udp_port = self.settings.local_udp_port;
+            self.settings = settings;
         }
+    }
+    fn typed_outputs(&mut self, ui: &mut Ui) {
+        if self.settings.input_only || self.settings.output_fields.is_empty() {
+            return;
+        }
+        self.output_entries
+            .resize_with(self.settings.output_fields.len(), String::new);
+        ui.collapsing("Stage typed output values", |ui| {
+            ui.small("Stage edits the hex buffer. Use Apply staged outputs to send it on an open connection.");
+            let mut staged = self.settings.output();
+            if staged.is_err() {
+                ui.label("Enter a full hex buffer or initialize it explicitly.");
+                if self.settings.output_size as usize <= model::MAX_ASSEMBLY_BYTES
+                    && ui.button("Stage zero-filled buffer").clicked()
+                {
+                    let bytes = vec![0; self.settings.output_size as usize];
+                    self.settings.output_hex = model::hex(&bytes);
+                    self.writes_confirmed = false;
+                    staged = Ok(bytes);
+                }
+            }
+            let Ok(mut bytes) = staged else { return; };
+            egui::Grid::new("typed-output").striped(true).show(ui, |ui| {
+                ui.strong("Output"); ui.strong("Staged"); ui.strong("New value"); ui.label("");
+                ui.end_row();
+                for index in 0..self.settings.output_fields.len() {
+                    let field = &self.settings.output_fields[index];
+                    ui.label(&field.name);
+                    ui.monospace(field.selection.decode(&bytes).map_or_else(|| "—".into(), |v| v.to_string()));
+                    ui.push_id(index, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.output_entries[index]).desired_width(100.0));
+                        if ui.button("Stage").clicked() {
+                            let name = self.settings.output_fields[index].name.clone();
+                            match self.settings.stage_output(index, &self.output_entries[index]) {
+                                Ok(()) => {
+                                    bytes = self.settings.output().expect("validated staged buffer");
+                                    self.writes_confirmed = false;
+                                    self.notice = Some(format!("Staged {name}"));
+                                    self.error = None;
+                                }
+                                Err(error) => self.error = Some(format!("{name}: {error}")),
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        });
     }
     fn dashboard(&mut self, ui: &mut Ui) {
         title(ui, "03", "Live device");
@@ -782,7 +1040,7 @@ impl App {
         }
         ui.separator();
         title(ui, "04", "Input assembly");
-        if let Some(v) = self.status.value {
+        if let Some(v) = &self.status.value {
             ui.label(
                 RichText::new(v.to_string())
                     .size(34.0)
@@ -800,6 +1058,27 @@ impl App {
             });
         }
         if !self.status.input.is_empty() {
+            if let Some(active) = &self.active {
+                egui::ScrollArea::vertical()
+                    .id_salt("mapped-input")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("input-readback")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for field in &active.capture_fields {
+                                    ui.label(&field.name);
+                                    ui.monospace(
+                                        field
+                                            .selection
+                                            .decode(&self.status.input)
+                                            .map_or_else(|| "—".into(), |value| value.to_string()),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
             egui::ScrollArea::vertical()
                 .id_salt("raw-input")
                 .max_height(116.0)
@@ -835,10 +1114,11 @@ impl App {
         if let Some(capture) = &self.capture {
             let s = &capture.sink;
             let seen = s.seen.load(Relaxed);
+            let unchanged = s.unchanged.load(Relaxed);
             let written = s.written.load(Relaxed);
             let overrun = s.overrun.load(Relaxed);
             ui.label(format!(
-                "{}  ·  Seen {seen}  ·  Written {written}",
+                "{}  ·  Seen {seen}  ·  Unchanged {unchanged}  ·  Written {written}",
                 if self.capturing { "Armed" } else { "Stopped" }
             ));
             ui.colored_label(
@@ -850,7 +1130,7 @@ impl App {
                     RED,
                     format!(
                         "Disk error — {e}  ·  Unconfirmed rows {}",
-                        seen.saturating_sub(written + overrun)
+                        seen.saturating_sub(written + overrun + unchanged)
                     ),
                 );
             }

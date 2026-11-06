@@ -713,7 +713,6 @@ fn receive(
                             status.input.clear();
                             status.input.extend_from_slice(bytes);
                             status.input_run = run;
-                            status.value = cfg.selection.decode(bytes);
                             if let Some(sink) = &*slot.read().unwrap() {
                                 sink.record(stamp, generation, seq, cip, bytes);
                             }
@@ -741,16 +740,17 @@ fn receive(
         }
         if stamp - publish >= Duration::from_millis(100) {
             status.spacing = spacing.snapshot();
-            publish_receive_status(shared, &mut status);
+            publish_receive_status(shared, &mut status, cfg.selection);
             publish = stamp;
         }
     };
     status.spacing = spacing.snapshot();
-    publish_receive_status(shared, &mut status);
+    publish_receive_status(shared, &mut status, cfg.selection);
     result
 }
 
-fn publish_receive_status(shared: &Shared, status: &mut Status) {
+fn publish_receive_status(shared: &Shared, status: &mut Status, selection: model::Selection) {
+    status.value = selection.decode(&status.input).map(Value::into_owned);
     let mut latest = shared.status.lock().unwrap();
     status.identity.clone_from(&latest.identity);
     status.identity_error.clone_from(&latest.identity_error);

@@ -1,4 +1,6 @@
-use crate::model::{CAPTURE_METADATA, CaptureField, MAX_CAPTURE_FIELDS, Settings, Value};
+use crate::model::{
+    CAPTURE_METADATA, CaptureField, CaptureMode, MAX_ASSEMBLY_BYTES, Settings, Value,
+};
 use chrono::Utc;
 use crossbeam_queue::ArrayQueue;
 use std::{
@@ -16,24 +18,32 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy)]
 struct Sample {
     elapsed: u64,
     index: u64,
     generation: u64,
     sequence: u32,
     cip_sequence: u16,
-    values: [Value; MAX_CAPTURE_FIELDS],
+    input: [u8; MAX_ASSEMBLY_BYTES],
+}
+
+#[derive(Default)]
+struct ChangeState {
+    previous: Option<(u64, [u8; MAX_ASSEMBLY_BYTES])>,
 }
 pub struct Sink {
     start: Instant,
     utc: String,
     queue: ArrayQueue<Sample>,
     fields: Vec<CaptureField>,
+    input_size: usize,
+    changes: Option<Mutex<ChangeState>>,
     header: String,
     stop: AtomicBool,
     failed: AtomicBool,
     pub seen: AtomicU64,
+    pub unchanged: AtomicU64,
+    next_index: AtomicU64,
     pub overrun: AtomicU64,
     pub written: AtomicU64,
     pub error: Mutex<Option<String>>,
@@ -50,20 +60,37 @@ impl Sink {
         cip_sequence: u16,
         input: &[u8],
     ) {
-        if stamp < self.start {
+        if stamp < self.start || input.len() != self.input_size {
             return;
         }
-        let index = self.seen.fetch_add(1, Relaxed);
+        self.seen.fetch_add(1, Relaxed);
+        let mut changes = self.changes.as_ref().map(|state| state.lock().unwrap());
+        if let Some((prior_generation, prior)) =
+            changes.as_ref().and_then(|state| state.previous.as_ref())
+            && *prior_generation == generation
+            && self.fields.iter().all(|field| {
+                let a = field.selection.decode(&prior[..self.input_size]);
+                let b = field.selection.decode(input);
+                match (a, b) {
+                    (Some(Value::Float32(a)), Some(Value::Float32(b))) => {
+                        a.to_bits() == b.to_bits()
+                    }
+                    (Some(Value::Float64(a)), Some(Value::Float64(b))) => {
+                        a.to_bits() == b.to_bits()
+                    }
+                    _ => a == b,
+                }
+            })
+        {
+            self.unchanged.fetch_add(1, Relaxed);
+            return;
+        }
         if self.failed.load(Relaxed) {
             return;
         }
-        let mut values = [Value::Unsigned(0); MAX_CAPTURE_FIELDS];
-        for (dest, field) in values.iter_mut().zip(&self.fields) {
-            let Some(value) = field.selection.decode(input) else {
-                return;
-            };
-            *dest = value;
-        }
+        let index = self.next_index.fetch_add(1, Relaxed);
+        let mut bytes = [0; MAX_ASSEMBLY_BYTES];
+        bytes[..self.input_size].copy_from_slice(input);
         if self
             .queue
             .push(Sample {
@@ -72,11 +99,13 @@ impl Sink {
                 generation,
                 sequence,
                 cip_sequence,
-                values,
+                input: bytes,
             })
             .is_err()
         {
             self.overrun.fetch_add(1, Relaxed);
+        } else if let Some(state) = &mut changes {
+            state.previous = Some((generation, bytes));
         }
     }
 }
@@ -110,6 +139,13 @@ impl Capture {
         let fields = settings
             .csv_fields()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let input_size = usize::from(settings.input_size);
+        if !(1..=MAX_ASSEMBLY_BYTES).contains(&input_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid capture input assembly size",
+            ));
+        }
         let mut header = CAPTURE_METADATA.join(",");
         for field in &fields {
             header.push(',');
@@ -129,10 +165,14 @@ impl Capture {
             utc: now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
             queue: ArrayQueue::new(opts.capacity),
             fields,
+            input_size,
+            changes: (settings.capture_mode == CaptureMode::OnChange).then(Mutex::default),
             header,
             stop: false.into(),
             failed: false.into(),
             seen: 0.into(),
+            unchanged: 0.into(),
+            next_index: 0.into(),
             overrun: 0.into(),
             written: 0.into(),
             error: Mutex::new(None),
@@ -216,8 +256,25 @@ fn drain(sink: &Sink, opts: Options, mut part: Part, delay: Duration) -> io::Res
                 sample.sequence,
                 sample.cip_sequence,
             )?;
-            for value in &sample.values[..sink.fields.len()] {
-                write!(line, ",{value}")?;
+            for field in &sink.fields {
+                let value = field
+                    .selection
+                    .decode(&sample.input[..sink.input_size])
+                    .ok_or_else(|| io::Error::other("Invalid CSV field selection"))?;
+                match value {
+                    Value::Text(bytes) => {
+                        line.extend_from_slice(b",\"");
+                        let text = String::from_utf8_lossy(bytes);
+                        for (index, segment) in text.split('"').enumerate() {
+                            if index != 0 {
+                                line.extend_from_slice(b"\"\"");
+                            }
+                            line.extend_from_slice(segment.as_bytes());
+                        }
+                        line.push(b'"');
+                    }
+                    _ => write!(line, ",{value}")?,
+                }
             }
             line.extend_from_slice(b"\r\n");
             if part.samples > 0
@@ -272,6 +329,7 @@ mod tests {
                     kind: crate::model::Kind::I16,
                     big_endian: true,
                     bit: None,
+                    ..crate::model::Selection::default()
                 },
             })
             .collect();
@@ -315,6 +373,90 @@ mod tests {
         }
         for path in parts {
             fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn change_capture_filters_unselected_bytes_and_quotes_text_across_reconnect() {
+        use crate::model::{Kind, Selection};
+        let dir = std::env::temp_dir().join(format!(
+            "assembly-scanner-changes-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let settings = Settings {
+            input_size: 8,
+            capture_fields: vec![
+                CaptureField {
+                    name: "text".into(),
+                    selection: Selection {
+                        kind: Kind::Utf8,
+                        string_length: Some(7),
+                        ..Selection::default()
+                    },
+                },
+                CaptureField {
+                    name: "other".into(),
+                    selection: Selection {
+                        kind: Kind::U8,
+                        offset: 7,
+                        ..Selection::default()
+                    },
+                },
+            ],
+            log_fields: Some(vec!["text".into()]),
+            capture_mode: CaptureMode::OnChange,
+            ..Settings::default()
+        };
+        let slot = Slot::default();
+        let mut capture = Capture::start(
+            &slot,
+            Options {
+                directory: dir.clone(),
+                capacity: 8,
+                rotate_bytes: 0,
+                rotate_seconds: 1,
+            },
+            &settings,
+        )
+        .unwrap();
+        for (n, (generation, bytes)) in [
+            (1, *b"a,\"b\n\0x\x01"),
+            (1, *b"a,\"b\n\0y\x02"),
+            (1, *b"new\0xyz\x03"),
+            (2, *b"new\0xyz\x04"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            capture.sink.record(
+                capture.sink.start + Duration::from_secs(n as u64),
+                *generation,
+                n as u32,
+                n as u16,
+                bytes,
+            );
+        }
+        capture.stop(&slot);
+        assert_eq!(capture.sink.seen.load(Relaxed), 4);
+        assert_eq!(capture.sink.unchanged.load(Relaxed), 1);
+        assert_eq!(capture.sink.written.load(Relaxed), 3);
+        assert_eq!(capture.sink.overrun.load(Relaxed), 0);
+        let mut files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 3);
+        for (file, expected) in files.iter().zip([
+            ",0,0,1,0,0,\"a,\"\"b\n\"\r\n",
+            ",2000000,1,1,2,2,\"new\"\r\n",
+            ",3000000,2,2,3,3,\"new\"\r\n",
+        ]) {
+            let csv = fs::read_to_string(file).unwrap();
+            assert!(csv.starts_with("capture_start_utc,elapsed_us,sample_index,connection_generation,packet_sequence,cip_sequence,text\r\n"));
+            assert!(csv.ends_with(expected), "{csv:?}");
+            fs::remove_file(file).unwrap();
         }
         fs::remove_dir(dir).unwrap();
     }
