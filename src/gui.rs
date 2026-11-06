@@ -1901,6 +1901,7 @@ mod tests {
         let report: toml::Table =
             toml::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
         assert!(report.get("connection").is_none());
+        assert!(report["attempts"].as_array().unwrap().is_empty());
         assert!(report["capture"]["disk_error"].as_str().is_some());
         assert_eq!(report["capture"]["unconfirmed_rows"].as_integer(), Some(1));
         assert_eq!(report["capture"]["buffer_overruns"].as_integer(), Some(0));
@@ -1915,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn run_report_keeps_the_connection_that_belonged_to_the_capture() {
+    fn run_report_keeps_only_connections_that_belonged_to_the_capture() {
         let directory = temporary("run-report");
         let mut device = Device::new(1, None);
         device.preferences.directory = directory.display().to_string();
@@ -1926,17 +1927,25 @@ mod tests {
         device.capture_run.track(1);
         sink.record(Instant::now(), 1, 1, 1, &[0; 4]);
         sink.record(Instant::now(), 1, 2, 2, &[0; 4]);
-        device.capture_run.track(2);
-        sink.record(Instant::now(), 2, 1, 1, &[0; 4]);
-        device.stop_capture();
-
-        device.generation = 2;
+        device.generation = 1;
         device.active = Some(Settings {
             device_ip: Ipv4Addr::new(127, 0, 0, 2),
             output_rpi_us: 1000,
             input_rpi_us: 1000,
             ..Settings::default()
         });
+        device.status = Status {
+            state: "Closed",
+            actual: Some((1000, 1000)),
+            valid: 2,
+            ..Status::default()
+        };
+        device.record_capture_connection();
+
+        device.capture_run.track(2);
+        sink.record(Instant::now(), 2, 1, 1, &[0; 4]);
+        device.stop_capture();
+        device.generation = 2;
         device.status = Status {
             state: "Timed out",
             actual: Some((1250, 1500)),
@@ -1985,6 +1994,12 @@ mod tests {
         assert_eq!(summary["last_value"].as_str(), Some("0"));
         assert_eq!(summary["changes_within_generation"].as_integer(), Some(0));
         let connection = &report["connection"];
+        let attempts = report["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["generation"].as_integer(), Some(1));
+        assert_eq!(attempts[0]["state"].as_str(), Some("Closed"));
+        assert_eq!(attempts[0]["accepted"].as_integer(), Some(2));
+        assert_eq!(&attempts[1], connection);
         assert_eq!(connection["generation"].as_integer(), Some(2));
         assert_eq!(connection["adapter_ip"].as_str(), Some("127.0.0.2"));
         assert_eq!(connection["state"].as_str(), Some("Timed out"));
@@ -1997,10 +2012,31 @@ mod tests {
         );
         assert!(device.save_run_report().is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        remove_capture_directory(directory);
+    }
+
+    fn remove_capture_directory(directory: PathBuf) {
         for file in fs::read_dir(&directory).unwrap() {
             fs::remove_file(file.unwrap().path()).unwrap();
         }
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[track_caller]
+    fn poll_until(device: &mut Device, ready: impl Fn(&Device) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            device.poll();
+            if ready(device) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "device state {}",
+                device.state_label()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -2011,18 +2047,9 @@ mod tests {
         device.preferences.directory = directory.display().to_string();
         device.start_capture();
         device.connect(&[]);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while device.connection.is_some() && device.status.valid < 50 && Instant::now() < deadline {
-            device.poll();
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        poll_until(&mut device, |device| device.status.valid >= 50);
         device.disconnect();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while device.connection.is_some() && Instant::now() < deadline {
-            device.poll();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(device.connection.is_none() && device.status.valid >= 50);
+        poll_until(&mut device, |device| !device.link_busy());
         device.stop_capture();
         let path = device.save_run_report().unwrap();
         let report: toml::Table = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -2035,6 +2062,10 @@ mod tests {
             Some(1)
         );
         let link = &report["connection"];
+        assert_eq!(
+            report["attempts"].as_array().unwrap().as_slice(),
+            std::slice::from_ref(link)
+        );
         assert_eq!(link["state"].as_str(), Some("Closed"));
         assert_eq!(link["forward_close"]["outcome"].as_str(), Some("confirmed"));
         assert_eq!(link["requested_ot_us"].as_integer(), Some(1000));
@@ -2050,10 +2081,64 @@ mod tests {
             link["accepted"].as_integer()
         );
         assert_eq!(report["capture"]["unconfirmed_rows"].as_integer(), Some(0));
-        for file in fs::read_dir(&directory).unwrap() {
-            fs::remove_file(file.unwrap().path()).unwrap();
+        remove_capture_directory(directory);
+    }
+
+    #[test]
+    #[ignore = "requires tools/loopback_adapter.py --mode recover on localhost"]
+    fn run_report_keeps_loopback_reconnect_attempts() {
+        let directory = temporary("reconnect-run-report");
+        let mut device = Device::new(1, None);
+        device.preferences.directory = directory.display().to_string();
+        device.preferences.rotate_bytes = 2048;
+        device.preferences.auto_reconnect = true;
+        device.settings.input_rpi_us = 8000;
+        device.settings.output_rpi_us = 8000;
+        device.verified_identity = Some(IdentityPin {
+            key: (0, 12, 1),
+            serial: 0x12345678,
+        });
+        device.start_capture();
+        device.connect(&[]);
+        poll_until(&mut device, |device| {
+            device.generation == 2 && device.status.valid >= 50
+        });
+        device.disconnect();
+        poll_until(&mut device, |device| !device.link_busy());
+        device.stop_capture();
+
+        let path = device.save_run_report().unwrap();
+        let report: toml::Table = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let [first, restored] = report["attempts"].as_array().unwrap().as_slice() else {
+            panic!("expected two connection attempts");
+        };
+        assert_eq!(first["generation"].as_integer(), Some(1));
+        assert_eq!(first["state"].as_str(), Some("Timed out"));
+        assert_eq!(
+            first["receive_timeout"]["limit_us"].as_integer(),
+            Some(256_000)
+        );
+        assert_eq!(restored["generation"].as_integer(), Some(2));
+        assert_eq!(restored["state"].as_str(), Some("Closed"));
+        assert!(restored.get("receive_timeout").is_none());
+        assert_eq!(&report["connection"], restored);
+        for attempt in [first, restored] {
+            assert_eq!(attempt["actual_ot_us"].as_integer(), Some(8000));
+            assert_eq!(attempt["actual_to_us"].as_integer(), Some(8000));
+            assert_eq!(attempt["identity"]["serial"].as_integer(), Some(0x12345678));
+            assert_eq!(
+                attempt["forward_close"]["outcome"].as_str(),
+                Some("confirmed")
+            );
         }
-        fs::remove_dir(directory).unwrap();
+        let capture = &report["capture"];
+        let accepted =
+            first["accepted"].as_integer().unwrap() + restored["accepted"].as_integer().unwrap();
+        assert_eq!(capture["written"].as_integer(), Some(accepted));
+        assert_eq!(capture["buffer_overruns"].as_integer(), Some(0));
+        assert!(capture["csv_parts"].as_integer().unwrap() > 1);
+        eprintln!("GUI report saved {accepted} rows across two attempts");
+        remove_capture_directory(directory);
     }
 
     #[test]

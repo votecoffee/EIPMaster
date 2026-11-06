@@ -292,6 +292,24 @@ A synthetic GUI report accounted for one visible sample-index gap and one overru
 
 The check also verified all 58,808 rows of an earlier six-part loopback capture using its original report. That report predated the part-count field and supplied the written row count and field summaries.
 
+## GUI reconnect history
+
+The headless GUI backend test ran an 8 ms input-only capture against the loopback adapter and kept CSV armed through a receive stall and automatic reconnect. The report preserved generation 1 as timed out with a 256 ms watchdog threshold and generation 2 as closed. Both entries retained the matching identity, negotiated intervals, and a confirmed Forward_Close. The adapter observed both close requests.
+
+All 127 accepted rows reached the rotated CSV parts. The compatibility `[connection]` section matched the final attempt, and the capture totals covered both generations. A unit test also verified that a later connection outside the capture leaves its report history intact.
+
+The 8 ms CLI regression and recovery tests passed. Two separate 1 ms CLI regressions hit the receive watchdog. The first fixture reached a 32.262 ms send interval in the mismatched-close case. The report preserved the timeout and mismatched close reply and saved all 668 accepted rows. The retry reached 32.339 ms of terminal input silence in the on-change capture. Its report accounted for 2,337 accepted packets as 147 saved rows and 2,190 packets filtered as unchanged, with a confirmed Forward_Close. These were localhost checks.
+
+Start the fixture in one terminal and run the GUI backend test in another. The test opens no window.
+
+```powershell
+python tools/loopback_adapter.py .local/report-recovery-adapter.json --mode recover
+```
+
+```powershell
+cargo test --locked --release --bin assembly-scanner run_report_keeps_loopback_reconnect_attempts -- --ignored --nocapture
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

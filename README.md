@@ -123,7 +123,7 @@ For a timed GUI bench run, start CSV capture before connecting. At the end, disc
 
 After the CSV writer flushes successfully, the GUI and CLI reports include `field_summaries` for each logged column. Each summary preserves the assembly selection, first and last saved values, and finite numeric minimum and maximum across all CSV parts. It counts changes between adjacent saved rows within each connection generation. Values are stored as text to preserve the CSV cell values and the full range of unsigned integers.
 
-The connection section covers the full lifetime of the latest connection that overlapped the capture. The capture section totals the CSV counts across all parts and records the range of connection generations while CSV was armed. Use one connection per capture when comparing timing across bench trials.
+The GUI report's `[[attempts]]` entries cover the full lifetime of each connection that overlapped the capture, in generation order. Match the attempt's `generation` to `connection_generation` in the CSV. The `[connection]` section repeats the latest attempt. The `[capture]` section totals the CSV counts across all parts and records the range of connection generations while CSV was armed.
 
 ### CLI
 

@@ -16,7 +16,7 @@ The offline timing and profile work can proceed while the bench device is unavai
 ## 0.3 Multiple adapters
 
 - [Run two isolated scanner sessions](https://github.com/votecoffee/EIPMaster/issues/5). The GUI keeps each adapter's setup, sockets, identity, staged outputs, and write authorization separate. The [dual-adapter loopback check](VERIFICATION.md#concurrent-adapter-sessions) exercises a receive timeout while the other session continues.
-- [Capture and recover streams independently](https://github.com/votecoffee/EIPMaster/issues/6). Each device has its own bounded CSV queue, rotation, loss counters, and reconnect generations. Optional reconnect verifies the adapter's identity on every attempt. The [headless recovery check](VERIFICATION.md#headless-recovery) exercises reconnect and writer failure alongside a healthy stream.
+- [Capture and recover streams independently](https://github.com/votecoffee/EIPMaster/issues/6). Each device has its own bounded CSV queue, rotation, loss counters, and reconnect generations. Optional reconnect verifies the adapter's identity on every attempt. The GUI run report retains the timing, errors, and final state of each capture generation. The [headless recovery check](VERIFICATION.md#headless-recovery) exercises reconnect and writer failure alongside a healthy stream.
 
 The milestone requires concurrent loopback coverage and compatibility with existing single-device profiles. [Multiple-adapter milestone](https://github.com/votecoffee/EIPMaster/milestone/2)
 

@@ -13,7 +13,7 @@ use std::{net::Ipv4Addr, path::PathBuf};
 pub(super) struct CaptureRun {
     first_generation: Option<u64>,
     last_generation: Option<u64>,
-    connection: Option<ConnectionReport>,
+    attempts: Vec<ConnectionReport>,
 }
 
 impl CaptureRun {
@@ -69,6 +69,7 @@ struct RunReport<'a> {
     device_label: &'a str,
     capture: CaptureReport<'a>,
     connection: Option<&'a ConnectionReport>,
+    attempts: &'a [ConnectionReport],
 }
 
 #[derive(Serialize)]
@@ -90,8 +91,7 @@ struct CaptureReport<'a> {
 }
 
 impl Device {
-    // Keep the final status of the latest connection during this capture.
-    // Draft settings and later, unrelated connections cannot change it.
+    // Preserve each finished generation before the live status is reset.
     pub(super) fn record_capture_connection(&mut self) {
         if self.capture_run.last_generation != Some(self.generation) {
             return;
@@ -101,7 +101,7 @@ impl Device {
         };
         let status = &self.status;
         let (actual_ot_us, actual_to_us) = status.actual.unzip();
-        self.capture_run.connection = Some(ConnectionReport {
+        self.capture_run.attempts.push(ConnectionReport {
             generation: self.generation,
             state: status.state,
             identity: status.identity.clone(),
@@ -171,7 +171,8 @@ impl Device {
                 disk_error: sink.error.lock().unwrap().clone(),
                 field_summaries: sink.field_summaries(),
             },
-            connection: self.capture_run.connection.as_ref(),
+            connection: self.capture_run.attempts.last(),
+            attempts: &self.capture_run.attempts,
         };
         let mut filename = sink
             .prefix
