@@ -454,13 +454,12 @@ fn capture(
                 connection.stop();
                 break;
             }
-            let now = Instant::now();
             if deadline.is_none()
-                && let Some(age) = connection.input_age()
+                && let Some(first) = connection.first_input_at()
             {
-                deadline = Some(now - age + Duration::from_secs(seconds));
+                deadline = Some(first + Duration::from_secs(seconds));
             }
-            if deadline.is_some_and(|end| now >= end) {
+            if deadline.is_some_and(|end| Instant::now() >= end) {
                 duration_reached = true;
                 connection.stop();
                 break;

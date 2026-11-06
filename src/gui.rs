@@ -1635,6 +1635,13 @@ impl Device {
                 s.intervals_at_or_over_2x_rpi,
                 s.intervals_at_or_over_4x_rpi
             ));
+            if let (Some(rate), Some(percent)) =
+                (s.observed_packets_per_second, s.percent_of_negotiated_rate)
+            {
+                ui.small(format!(
+                    "{rate:.1} packets/s  ·  {percent:.1}% of negotiated rate"
+                ));
+            }
         }
         ui.separator();
         title(ui, "04", "Input assembly");

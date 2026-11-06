@@ -261,6 +261,21 @@ All five captures reported failure and saved all accepted rows. Qualification sa
 
 An independent three-second OpENer run requested and negotiated 30 ms in each direction. The scanner confirmed Forward_Close and wrote 101 accepted rows with zero sequence gaps, watchdog timeouts, or CSV overruns. These checks used localhost software adapters.
 
+## Observed packet rates
+
+The CLI uses the first accepted packet to anchor the capture deadline. A clock test verified that later packets update the live age without moving that anchor. The GUI and run reports compute the observed rate from interval count divided by the first-to-last packet span. They compare each direction against its Forward_Open interval.
+
+An 8 ms loopback fixture produced input every 16 ms while advancing the sequence on each send. The scanner measured 50.0% of the negotiated input rate. The capture reported zero sequence gaps and zero CSV overruns. The CLI tests cross-checked the receive span against CSV timestamps and both rates against their spans and negotiated intervals.
+
+A separate 60-second headless loopback run requested 1,000 microseconds in both directions and Forward_Open returned 1,000 microseconds in both directions. It closed cleanly and wrote all 59,950 accepted input rows across seven CSV parts with contiguous indexes, zero receive sequence gaps, zero watchdog timeouts, and zero CSV overruns.
+
+| Socket measurement | Observed span (s) | Packets per second | Percent of negotiated rate | p99 / longest (microseconds) |
+|---|---:|---:|---:|---:|
+| O-to-T send | 60.009960 | 998.8 | 99.88 | 1,463 / 15,161 |
+| T-to-O receive | 60.010275 | 999.0 | 99.90 | 1,482 / 3,624 |
+
+The scanner skipped 72 scheduled sends and the fixture skipped 61. These were loopback socket measurements.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

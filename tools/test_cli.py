@@ -3,6 +3,7 @@
 import argparse
 from itertools import pairwise
 import json
+from math import isclose
 from pathlib import Path
 import subprocess
 import sys
@@ -41,6 +42,11 @@ def check_spacing(capture, samples):
     assert send["intervals"] == capture["sent"] - 1
     timestamps = [int(row[1]) for row in samples]
     assert abs(receive["span_us"] - (timestamps[-1] - timestamps[0])) <= 1
+    for spacing, rpi in [(receive, capture["actual_to_us"]), (send, capture["actual_ot_us"])]:
+        span = spacing["span_us"]
+        rate = spacing["observed_packets_per_second"]
+        assert isclose(rate, spacing["intervals"] * 1e6 / span, rel_tol=1 / span + 1e-12)
+        assert isclose(spacing["percent_of_negotiated_rate"], 100 * rate / (1e6 / rpi))
     intervals = [end - start for start, end in pairwise(timestamps)]
     for multiple in (2, 4):
         key = f"intervals_at_or_over_{multiple}x_rpi"
@@ -311,6 +317,20 @@ def main():
     assert timing["max_dispatch_lateness_us"] >= (args.rpi_us if report["skipped_deadlines"] else 0)
     assert timing["max_send_call_us"] >= (args.rpi_us if timing["send_calls_at_or_over_rpi"] else 0)
     check_close_failures(capture, root)
+
+    slow, adapter = with_adapter(
+        root, "slow-input", [*capture, root / "slow-input", "2", "0:12:1"], "slow-input"
+    )
+    assert slow.returncode == 0 and adapter["forward_close"], (slow.stdout, slow.stderr)
+    slow_report = tomllib.loads(slow.stdout)
+    assert slow_report["actual_to_us"] == args.rpi_us
+    assert slow_report["sequence_gaps"] == slow_report["buffer_overruns"] == 0
+    assert slow_report["written"] == slow_report["accepted"]
+    slow_spacing = slow_report["receive_spacing"]
+    assert 35 < slow_spacing["percent_of_negotiated_rate"] < 55
+    slow_samples = list(rows(parts_for(Path(slow_report["csv_prefix"]))))
+    check_spacing(slow_report, slow_samples)
+    print(f"Contiguous input at {slow_spacing['percent_of_negotiated_rate']:.1f}% of negotiated rate")
 
     if sys.platform == "win32":
         priority = root / "priority.toml"

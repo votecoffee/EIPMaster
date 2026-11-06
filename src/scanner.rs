@@ -136,6 +136,8 @@ impl Reconnect {
 pub struct Spacing {
     pub intervals: u64,
     pub span_us: u64,
+    pub observed_packets_per_second: Option<f64>,
+    pub percent_of_negotiated_rate: Option<f64>,
     pub p50_us: u64,
     pub p95_us: u64,
     pub p99_us: u64,
@@ -217,9 +219,15 @@ impl Histogram {
                 break;
             }
         }
+        let observed_packets_per_second =
+            (!self.span.is_zero()).then(|| self.count as f64 / self.span.as_secs_f64());
+        let negotiated_packets_per_second = 1_000_000.0 / self.rpi_us as f64;
         Spacing {
             intervals: self.count,
             span_us: self.span.as_micros().min(u64::MAX.into()) as u64,
+            observed_packets_per_second,
+            percent_of_negotiated_rate: observed_packets_per_second
+                .map(|rate| 100.0 * rate / negotiated_packets_per_second),
             p50_us: values[0],
             p95_us: values[1],
             p99_us: values[2],
@@ -319,6 +327,36 @@ pub struct SendTiming {
     pub send_calls_at_or_over_rpi: u64,
 }
 
+struct InputTimes {
+    origin: Instant,
+    first_us: AtomicU64,
+    latest_us: AtomicU64,
+}
+
+impl InputTimes {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            first_us: AtomicU64::new(0),
+            latest_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, stamp: Instant, first: bool) {
+        // An offset of zero in either atomic means no input has arrived yet.
+        let offset = (stamp - self.origin).as_micros() as u64 + 1;
+        if first {
+            self.first_us.store(offset, Relaxed);
+        }
+        self.latest_us.store(offset, Relaxed);
+    }
+
+    fn timestamp(&self, offset: &AtomicU64) -> Option<Instant> {
+        let micros = offset.load(Relaxed).checked_sub(1)?;
+        Some(self.origin + Duration::from_micros(micros))
+    }
+}
+
 pub struct Connection {
     pub status: Arc<Mutex<Status>>,
     pub output: Arc<Mutex<Vec<u8>>>,
@@ -326,8 +364,7 @@ pub struct Connection {
     pub skipped: Arc<AtomicU64>,
     pub tx_spacing: Arc<Mutex<Spacing>>,
     pub send_timing: Arc<Mutex<SendTiming>>,
-    clock_origin: Instant,
-    latest_input_us: Arc<AtomicU64>,
+    input_times: Arc<InputTimes>,
     stop: Arc<AtomicBool>,
     worker: JoinHandle<()>,
 }
@@ -408,8 +445,7 @@ impl Connection {
             skipped: Arc::new(AtomicU64::new(0)),
             tx_spacing: Arc::new(Mutex::new(Spacing::default())),
             send_timing: Arc::new(Mutex::new(SendTiming::default())),
-            clock_origin: Instant::now(),
-            latest_input_us: Arc::new(AtomicU64::new(0)),
+            input_times: Arc::new(InputTimes::new()),
         };
         let connection = shared.clone();
         let worker = thread::Builder::new()
@@ -455,14 +491,17 @@ impl Connection {
             skipped: connection.skipped,
             tx_spacing: connection.tx_spacing,
             send_timing: connection.send_timing,
-            clock_origin: connection.clock_origin,
-            latest_input_us: connection.latest_input_us,
+            input_times: connection.input_times,
             worker,
         })
     }
+    pub fn first_input_at(&self) -> Option<Instant> {
+        self.input_times.timestamp(&self.input_times.first_us)
+    }
     pub fn input_age(&self) -> Option<Duration> {
-        let offset = self.latest_input_us.load(Relaxed).checked_sub(1)?;
-        Some((self.clock_origin + Duration::from_micros(offset)).elapsed())
+        self.input_times
+            .timestamp(&self.input_times.latest_us)
+            .map(|stamp| stamp.elapsed())
     }
     pub fn stop(&self) {
         self.stop.store(true, Relaxed);
@@ -483,8 +522,7 @@ struct Shared {
     skipped: Arc<AtomicU64>,
     tx_spacing: Arc<Mutex<Spacing>>,
     send_timing: Arc<Mutex<SendTiming>>,
-    clock_origin: Instant,
-    latest_input_us: Arc<AtomicU64>,
+    input_times: Arc<InputTimes>,
 }
 
 struct Session {
@@ -1040,10 +1078,7 @@ fn receive(
                                 spacing.add(stamp - last);
                             }
                             status.last_input = Some(stamp);
-                            shared.latest_input_us.store(
-                                (stamp - shared.clock_origin).as_micros() as u64 + 1,
-                                Relaxed,
-                            );
+                            shared.input_times.record(stamp, status.valid == 0);
                             status.state = "Receiving";
                             status.valid += 1;
                             status.input.clear();
@@ -1136,6 +1171,33 @@ mod tests {
         assert_eq!(summary.span_us, 14_999);
         assert_eq!(summary.intervals_at_or_over_2x_rpi, 3);
         assert_eq!(summary.intervals_at_or_over_4x_rpi, 1);
+    }
+
+    #[test]
+    fn packet_rate_measures_interval_count_over_elapsed_span() {
+        let mut histogram = Histogram::new(1_000);
+        assert!(histogram.snapshot().observed_packets_per_second.is_none());
+        histogram.add(Duration::ZERO);
+        assert!(histogram.snapshot().percent_of_negotiated_rate.is_none());
+        for us in [1_000, 1_000, 6_000] {
+            histogram.add(Duration::from_micros(us));
+        }
+        let summary = histogram.snapshot();
+        assert_eq!(summary.span_us, 8_000);
+        assert!((summary.observed_packets_per_second.unwrap() - 500.0).abs() < 1e-9);
+        assert!((summary.percent_of_negotiated_rate.unwrap() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn input_clock_preserves_the_first_packet_as_the_latest_advances() {
+        let times = InputTimes::new();
+        assert!(times.timestamp(&times.first_us).is_none());
+        let first = times.origin + Duration::from_micros(800);
+        let latest = times.origin + Duration::from_micros(1_800);
+        times.record(first, true);
+        times.record(latest, false);
+        assert_eq!(times.timestamp(&times.first_us), Some(first));
+        assert_eq!(times.timestamp(&times.latest_us), Some(latest));
     }
 
     #[test]

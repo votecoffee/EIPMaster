@@ -70,7 +70,7 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     prior_sequence = last_sent_sequence = None
     missed = invalid = skipped = 0
     seq = 0
-    period = api * 1000
+    period = api * 1000 * (2 if mode == "slow-input" else 1)
     deadline = None
     udp.setblocking(False)
     while not stop.is_set():
@@ -227,6 +227,7 @@ def main():
         "reconnect", "recover", "replacement", "qualify", "qualify-different-api",
         "qualify-replacement", "close-reject", "close-mismatch", "close-short", "close-eof",
         "stall-close-reject", "qualify-close-reject",
+        "slow-input",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
