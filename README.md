@@ -9,6 +9,7 @@ EIPMaster is the source repository for the Assembly Scanner desktop application.
 - [Install](#install)
 - [Usage](#usage)
 - [Verification](#verification)
+- [Roadmap](#roadmap)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [License](#license)
@@ -122,6 +123,10 @@ The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exerci
 cargo +stable-x86_64-pc-windows-msvc test --locked --release
 python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\cli-check
 ```
+
+## Roadmap
+
+The [roadmap](ROADMAP.md) tracks the single-device preview, multiple adapters, and device compatibility. GitHub milestones link the work and its acceptance criteria.
 
 ## Maintainers
 

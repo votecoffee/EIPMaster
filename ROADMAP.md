@@ -1,0 +1,28 @@
+# EIPMaster roadmap
+
+EIPMaster is a standalone Windows x64 EtherNet/IP scanner. The current build handles one fixed-size cyclic Class 1 unicast connection. It supports EDS and manual setup, saved profiles, typed assembly mappings, authorized output staging, a GUI and CLI, and selective CSV logging with rotation and loss accounting.
+
+Simulator checks cover that workflow. Physical acceptance of sustained 1 ms capture in EIPMaster remains open. Treat the requested RPI, the intervals returned by Forward_Open, and the measured send and receive spacing as separate results.
+
+## 0.2 Single-device preview
+
+1. [Improve Windows 1 ms producer timing](https://github.com/votecoffee/EIPMaster/issues/1). Compare the previous and candidate producers with the GUI, logger, and independent localhost adapter active. Record spacing percentiles, the longest gaps, skipped send slots, packet sequence gaps, timeouts, and CSV loss.
+2. [Add offline profile preflight](https://github.com/votecoffee/EIPMaster/issues/3). Make connection settings, output ownership, assembly bounds, and EDS-derived sizes reviewable before opening I/O. Distinguish the EDS assembly definition width from a confirmed device payload.
+3. [Qualify the physical bench path](https://github.com/votecoffee/EIPMaster/issues/2). When the bench adapter is available, verify identity and start at 8 ms in input-only mode. Attempt three 60-second captures at 1 ms on the direct link. Record the same timing and loss metrics and qualify any intended switched path separately.
+4. [Package a Windows x64 preview](https://github.com/votecoffee/EIPMaster/issues/4). Build with locked dependencies and test the GUI and CLI from a fresh unpacked folder. Include generic samples, licensing, and build identity. Mark the package with its actual hardware verification status.
+
+The offline timing and profile work can proceed while the bench device is unavailable. Physical qualification requires completed captures with the GUI and logger active, clean close, and no watchdog timeout, local buffer overrun, or unexplained packet loss under the recorded bench conditions. [Single-device milestone](https://github.com/votecoffee/EIPMaster/milestone/1)
+
+## 0.3 Multiple adapters
+
+- [Run two isolated scanner sessions](https://github.com/votecoffee/EIPMaster/issues/5). Keep connection settings, sockets, identity, staged outputs, and write authorization separate. Prove that a simulated fault on one device leaves the other session running.
+- [Capture and recover streams independently](https://github.com/votecoffee/EIPMaster/issues/6). Give each device its own bounded CSV queue, rotation, loss counters, and reconnect generations. Scope automatic reconnect to verified input-only sessions.
+
+The milestone requires concurrent loopback coverage and compatibility with existing single-device profiles. [Multiple-adapter milestone](https://github.com/votecoffee/EIPMaster/milestone/2)
+
+## 0.4 Adapter compatibility
+
+- [Verify a second documented adapter family](https://github.com/votecoffee/EIPMaster/issues/7). Start with EDS interpretation, identity, assembly formats, and sustained unicast input-only capture.
+- Prioritize Large Forward_Open, electronic keys, routed paths, or multicast when a documented device needs them. Pair each protocol extension with a fixture and device-level evidence.
+
+Device profiles, vendor files, and raw captures belong in the ignored `.local/` directory. [Adapter-compatibility milestone](https://github.com/votecoffee/EIPMaster/milestone/3)
