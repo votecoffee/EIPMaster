@@ -67,7 +67,7 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     sent, received = [], []
     output_values = set()
     owner = mode == "owner"
-    prior_sequence = None
+    prior_sequence = last_sent_sequence = None
     missed = invalid = skipped = 0
     seq = 0
     period = api * 1000
@@ -106,11 +106,15 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
             skipped += slots - 1
             deadline += slots * period
             seq = (seq + 1) & 0xFFFFFFFF
-            if not (mode == "faults" and seq == 60) and not (mode == "stall" and seq > 75):
+            drop = mode == "no-input" or (mode == "stall" and seq > 75) or (mode == "faults" and seq == 60)
+            if not drop:
                 value = struct.pack("<I", value_base + seq // 16)
+                if mode == "invalid-input":
+                    value = value[:-1]
                 packet = io_packet(connection, seq, (bytes((1, 0, 0, 0)) if owner else b"") + value)
                 udp.sendto(packet, endpoint)
                 sent.append(time.perf_counter_ns())
+                last_sent_sequence = seq
                 if mode == "faults" and seq == 80:
                     udp.sendto(packet, endpoint)
                     udp.sendto(io_packet(connection, 60, value), endpoint)
@@ -122,6 +126,8 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
     report.update({
         "ot_received": len(received), "ot_sequence_gaps": missed, "ot_invalid": invalid,
         "ot_receive_spacing": spacing(received), "to_sent": len(sent),
+        "to_last_sequence": last_sent_sequence,
+        "to_last_gap_us": (sent[-1] - sent[-2]) // 1000 if len(sent) >= 2 else None,
         "to_send_spacing": spacing(sent), "to_skipped_deadline_slots": skipped, "output_values": sorted(output_values),
     })
 
@@ -206,7 +212,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--mode", default="normal", choices=(
-        "normal", "faults", "stall", "reject", "different-api", "owner",
+        "normal", "faults", "stall", "no-input", "invalid-input", "reject", "different-api", "owner",
         "reconnect", "recover", "replacement", "qualify", "qualify-different-api",
         "qualify-replacement",
     ))

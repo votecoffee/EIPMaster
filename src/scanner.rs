@@ -211,6 +211,16 @@ impl Histogram {
     }
 }
 
+/// Terminal receive timing. The silence includes the interval after the last valid packet.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct ReceiveTimeout {
+    pub waiting_for_first_input: bool,
+    pub limit_us: u64,
+    pub valid_input_silence_us: u64,
+    pub last_udp_age_us: Option<u64>,
+    pub last_sequence: Option<u32>,
+}
+
 #[derive(Clone, Default)]
 pub struct Status {
     pub state: &'static str,
@@ -229,6 +239,7 @@ pub struct Status {
     pub late: u64,
     pub invalid: u64,
     pub timeouts: u64,
+    pub receive_timeout: Option<ReceiveTimeout>,
     pub retryable: bool,
     pub spacing: Spacing,
 }
@@ -591,6 +602,7 @@ fn run(
     socket.set_recv_buffer_size(512 * 1024)?;
     socket.bind(&SocketAddr::from((cfg.local_ip, cfg.local_udp_port)).into())?;
     let udp: UdpSocket = socket.into();
+    #[cfg(not(windows))]
     udp.set_read_timeout(Some(Duration::from_millis(2)))?;
     udp.set_write_timeout(Some(Duration::from_millis(10)))?;
 
@@ -787,6 +799,51 @@ fn parse_packet(
         &packet[start..],
     ))
 }
+#[cfg(windows)]
+fn wait_for_udp(udp: &UdpSocket) -> io::Result<bool> {
+    use std::{os::windows::io::AsRawSocket, ptr::null_mut};
+    use windows_sys::Win32::Networking::WinSock::{
+        FD_SET, SOCKET_ERROR, TIMEVAL, WSAGetLastError, select,
+    };
+
+    let mut readable = FD_SET {
+        fd_count: 1,
+        ..FD_SET::default()
+    };
+    readable.fd_array[0] = udp.as_raw_socket() as usize;
+    let timeout = TIMEVAL {
+        tv_sec: 0,
+        tv_usec: 2_000,
+    };
+    // SAFETY: The arguments stay valid for this call, and the borrowed socket stays open.
+    let result = unsafe { select(0, &mut readable, null_mut(), null_mut(), &timeout) };
+    if result == SOCKET_ERROR {
+        Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
+    } else {
+        Ok(result != 0)
+    }
+}
+
+fn receive_datagram(udp: &UdpSocket, packet: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+    // Wait for readiness so an idle interval never cancels a Windows recvfrom.
+    #[cfg(windows)]
+    if !wait_for_udp(udp)? {
+        return Ok(None);
+    }
+    match udp.recv_from(packet) {
+        Ok(packet) => Ok(Some(packet)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn receive(
     udp: &UdpSocket,
     cfg: &Settings,
@@ -802,6 +859,7 @@ fn receive(
     let watchdog = Duration::from_micros(u64::from(reply.t_to_o_actual_rpi_us) * 32);
     let mut packet = [0; 65_536];
     let mut last_seq: Option<u32> = None;
+    let mut last_udp = None;
     let mut seen = 0u64;
     let mut status = shared.status.lock().unwrap().clone();
     let mut spacing = Histogram::new();
@@ -810,10 +868,11 @@ fn receive(
         if shared.stop.load(Relaxed) {
             break Ok(());
         }
-        let result = udp.recv_from(&mut packet);
+        let result = receive_datagram(udp, &mut packet);
         let stamp = Instant::now();
         match result {
-            Ok((length, addr)) => {
+            Ok(Some((length, addr))) => {
+                last_udp = Some(stamp);
                 match parse_packet(
                     &packet[..length],
                     reply.t_to_o_connection_id,
@@ -858,19 +917,21 @@ fn receive(
                     None => status.invalid += 1,
                 }
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
+            Ok(None) => {}
             Err(e) => break Err(e.into()),
         }
-        if status
+        let (since, limit) = status
             .last_input
-            .map_or(stamp - started >= first_timeout, |last| {
-                stamp - last >= watchdog
-            })
-        {
+            .map_or((started, first_timeout), |last| (last, watchdog));
+        let silence = stamp - since;
+        if silence >= limit {
+            status.receive_timeout = Some(ReceiveTimeout {
+                waiting_for_first_input: status.last_input.is_none(),
+                limit_us: limit.as_micros() as u64,
+                valid_input_silence_us: silence.as_micros() as u64,
+                last_udp_age_us: last_udp.map(|last| (stamp - last).as_micros() as u64),
+                last_sequence: last_seq,
+            });
             status.timeouts += 1;
             status.retryable = true;
             status.state = "Timed out";

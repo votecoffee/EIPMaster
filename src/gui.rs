@@ -1534,6 +1534,30 @@ impl Device {
             ),
             self.status.timeouts
         ));
+        if let Some(timeout) = self.status.receive_timeout {
+            let phase = if timeout.waiting_for_first_input {
+                "First input timeout"
+            } else {
+                "Receive watchdog"
+            };
+            ui.colored_label(
+                AMBER,
+                format!(
+                    "{phase} · Valid input silent for {:.3} ms · Limit {:.3} ms",
+                    timeout.valid_input_silence_us as f64 / 1000.0,
+                    timeout.limit_us as f64 / 1000.0,
+                ),
+            );
+            if let Some(age) = timeout.last_udp_age_us {
+                ui.small(format!(
+                    "Last UDP datagram at timeout · {:.3} ms old",
+                    age as f64 / 1000.0
+                ));
+            }
+            if let Some(sequence) = timeout.last_sequence {
+                ui.small(format!("Last accepted packet sequence · {sequence}"));
+            }
+        }
         ui.label(format!(
             "Accepted {}  ·  Gap estimates {}  ·  Duplicates {}  ·  Late {}  ·  Invalid {}",
             self.status.valid,

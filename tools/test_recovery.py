@@ -113,6 +113,13 @@ def concurrent(exe, root):
     prior, restored = recovered["attempts"]
     assert (prior["state"], restored["state"]) == ("Timed out", "Closed")
     assert (prior["generation"], restored["generation"]) == (1, 2)
+    timeout = prior["receive_timeout"]
+    assert not timeout["waiting_for_first_input"]
+    assert timeout["limit_us"] == 256_000
+    assert 0 < timeout["last_sequence"] <= recovered_adapters[0]["to_last_sequence"] == 75
+    assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
+    assert timeout["last_udp_age_us"] <= timeout["valid_input_silence_us"]
+    assert "receive_timeout" not in restored and "receive_timeout" not in recovered
     assert recovered["accepted"] == recovered["written"] == prior["accepted"] + restored["accepted"]
     assert all("disk_error" not in report for report in (healthy, recovered))
     assert "disk_error" in disk and not disk["duration_reached"]
@@ -132,6 +139,7 @@ def concurrent(exe, root):
     assert {row[3] for row in h} == {row[3] for row in d} == {"1"}
     first_recovered = next(index for index, row in enumerate(r) if row[3] == "2")
     assert first_recovered == prior["accepted"] and {row[3] for row in r} == {"1", "2"}
+    assert int(r[first_recovered - 1][4]) == timeout["last_sequence"]
     assert timestamp(r[first_recovered]) - timestamp(r[first_recovered - 1]) >= timedelta(seconds=1)
     assert timestamp(h[0]) < min(timestamp(d[-1]), timestamp(r[first_recovered - 1]))
     assert timestamp(h[-1]) > max(timestamp(d[-1]), timestamp(r[first_recovered]))

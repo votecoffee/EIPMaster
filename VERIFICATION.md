@@ -147,6 +147,35 @@ A full headless loopback sequence requested 8,000 µs in both directions for the
 
 The fixture received Forward_Close on all four runs. All accepted packets were present in the rotated CSV parts with contiguous sample indexes. There were zero buffer overruns and disk errors. Spacing describes intervals between received packets. The terminal watchdog silence has no later packet to measure as an interval. These results are from localhost with the GUI closed.
 
+## Windows receive readiness and watchdog evidence
+
+The previous full headless sequence ended twice at a 32 ms receive watchdog limit. In one run the fixture recorded a 39.777 ms send gap. In the other its longest measured send gap was 27.872 ms. The earlier reports did not correlate the exact watchdog event with a fixture send timestamp, so the immediate causes remain unconfirmed.
+
+On Windows the receiver now uses Winsock `select` to wait for readable UDP data before calling `recvfrom`. The receiver requests a 2 ms idle wait and keeps the same watchdog limits. [Winsock readiness semantics](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-select)
+
+Three alternating 10-second pairs per RPI compared the timed receive build (`83f19bf`) with the readiness build on the same localhost fixture. The requested intervals and Forward_Open intervals matched the listed RPI in both directions.
+
+| RPI | Receive path | Accepted and written | Sequence gaps | Per-run receive p99 range (µs) | Longest receive gap (µs) |
+|---|---|---:|---:|---:|---:|
+| 8 ms | Timed receive | 3,750 | 4 | 8,402–8,620 | 18,507 |
+| 8 ms | Readiness | 3,753 | 0 | 8,494–8,623 | 9,834 |
+| 1 ms | Timed receive | 29,894 | 6 | 1,492–1,622 | 11,812 |
+| 1 ms | Readiness | 29,815 | 0 | 1,495–1,803 | 4,409 |
+
+All runs closed cleanly with zero receive watchdog timeouts and zero CSV overruns. The fixture skipped 132 send slots in the timed 1 ms trials and 227 in the readiness trials. Skipped fixture slots occur before sequence assignment. The trials show fewer received sequence gaps with readiness on this host. They did not reproduce the earlier watchdog failures.
+
+A separate 60-second readiness run requested 1,000 µs in both directions and received 1,000 µs in both directions from Forward_Open. It closed cleanly with 58,772 accepted and written rows, zero receive sequence gaps, zero watchdog timeouts, and zero CSV overruns.
+
+| Measurement point | p50 µs | p95 µs | p99 µs | Longest µs |
+|---|---:|---:|---:|---:|
+| Scanner T→O receive | 1,047 | 1,365 | 1,818 | 4,923 |
+| Scanner O→T send | 1,043 | 1,280 | 1,708 | 4,785 |
+| Fixture T→O send | 1,046 | 1,369 | 1,805 | 5,573 |
+
+The scanner skipped 524 send slots and the fixture skipped 1,243. The scan and CSV capture ran headlessly over localhost.
+
+Timeout reports now include the threshold, terminal silence, time since any received UDP datagram, and the last valid sequence when available. The headless CLI tests distinguish a quiet first-input wait from a first-input wait with malformed traffic. The recovery test checks a cyclic watchdog's terminal sequence against its last CSV sample.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

@@ -208,6 +208,23 @@ def main():
     assert "ot_requested_us" not in adapter
     assert "last_input_hex" not in tomllib.loads(mismatch.stdout)
 
+    for mode in ("no-input", "invalid-input"):
+        no_input, adapter = with_adapter(
+            root, mode, [*capture, root / mode, "1", "0:12:1"], mode
+        )
+        report = tomllib.loads(no_input.stdout)
+        assert no_input.returncode == 1 and report["state"] == "Timed out" and report["timeouts"] == 1
+        assert report["accepted"] == report["written"] == 0 and adapter["forward_close"]
+        timeout = report["receive_timeout"]
+        assert timeout["waiting_for_first_input"] and timeout["limit_us"] == 2_000_000
+        assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
+        assert "last_sequence" not in timeout
+        if mode == "invalid-input":
+            assert adapter["to_sent"] >= report["invalid"] > 0
+            assert timeout["last_udp_age_us"] < timeout["valid_input_silence_us"]
+        else:
+            assert report["invalid"] == adapter["to_sent"] == 0 and "last_udp_age_us" not in timeout
+
     success, adapter = with_adapter(root, "capture", [*capture, root / "capture", "2", "0:12:1"])
     assert success.returncode == 0, (success.stdout, success.stderr)
     report = tomllib.loads(success.stdout)
@@ -288,7 +305,7 @@ def main():
                             capture_output=True, text=True, timeout=5)
     assert reject.returncode == 1 and "input-only" in reject.stderr
     assert not (root / "unsafe").exists()
-    print(f"CLI verified: EDS, offline preflight, identity, mismatch rejected, {len(samples)} legacy rows, "
+    print(f"CLI verified: EDS, preflight, identity, first-input timeout diagnostics, {len(samples)} legacy rows, "
           f"{len(multi_samples)} multi-field rows, {len(changed)} change rows, unsafe profile rejected.")
 
 
