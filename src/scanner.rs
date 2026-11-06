@@ -144,16 +144,45 @@ struct Histogram {
     max: u64,
 }
 impl Histogram {
+    // Exact microsecond buckets through 32,767 µs, then 256 buckets per doubling.
+    const EXACT_BITS: u32 = 15;
+    const PRECISION_BITS: u32 = 8;
+    const EXACT_BINS: usize = 1 << Self::EXACT_BITS;
+    const BINS_PER_OCTAVE: usize = 1 << Self::PRECISION_BITS;
+    const TOTAL_BINS: usize =
+        Self::EXACT_BINS + (u64::BITS - Self::EXACT_BITS) as usize * Self::BINS_PER_OCTAVE;
+
     fn new() -> Self {
         Self {
-            bins: vec![0; 20_001],
+            bins: vec![0; Self::TOTAL_BINS],
             count: 0,
             max: 0,
         }
     }
+    fn bucket(us: u64) -> usize {
+        if us < Self::EXACT_BINS as u64 {
+            return us as usize;
+        }
+        let octave = us.ilog2();
+        let shift = octave - Self::PRECISION_BITS;
+        let offset = (us >> shift) as usize - Self::BINS_PER_OCTAVE;
+        Self::EXACT_BINS + (octave - Self::EXACT_BITS) as usize * Self::BINS_PER_OCTAVE + offset
+    }
+
+    fn bucket_upper(index: usize) -> u64 {
+        if index < Self::EXACT_BINS {
+            return index as u64;
+        }
+        let coarse = index - Self::EXACT_BINS;
+        let octave = Self::EXACT_BITS + (coarse / Self::BINS_PER_OCTAVE) as u32;
+        let shift = octave - Self::PRECISION_BITS;
+        let mantissa = (Self::BINS_PER_OCTAVE + coarse % Self::BINS_PER_OCTAVE) as u64;
+        (mantissa << shift) | ((1u64 << shift) - 1)
+    }
+
     fn add(&mut self, gap: Duration) {
-        let us = gap.as_micros() as u64;
-        self.bins[us.min(20_000) as usize] += 1;
+        let us = gap.as_micros().min(u64::MAX.into()) as u64;
+        self.bins[Self::bucket(us)] += 1;
         self.count += 1;
         self.max = self.max.max(us);
     }
@@ -162,10 +191,10 @@ impl Histogram {
         let targets = [50, 95, 99].map(|pct| (self.count * pct).div_ceil(100));
         let mut cumulative = 0;
         let mut i = 0;
-        for (us, n) in self.bins.iter().enumerate() {
+        for (index, n) in self.bins.iter().enumerate() {
             cumulative += n;
             while i < 3 && cumulative >= targets[i] {
-                values[i] = us as u64;
+                values[i] = Self::bucket_upper(index).min(self.max);
                 i += 1;
             }
             if i == 3 {
@@ -869,6 +898,30 @@ fn publish_receive_status(shared: &Shared, status: &mut Status, selection: model
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spacing_reports_short_intervals_exactly_and_bounds_long_percentiles() {
+        let mut histogram = Histogram::new();
+        for (us, count) in [(1_001, 50), (30_000, 45), (2_000_000, 4), (5_000_000, 1)] {
+            for _ in 0..count {
+                histogram.add(Duration::from_micros(us));
+            }
+        }
+        let summary = histogram.snapshot();
+        assert_eq!(summary.intervals, 100);
+        assert_eq!(summary.p50_us, 1_001);
+        assert_eq!(summary.p95_us, 30_000);
+        assert!((2_000_000..=2_008_000).contains(&summary.p99_us));
+        assert_eq!(summary.max_us, 5_000_000);
+
+        let mut edge = Histogram::new();
+        edge.add(Duration::from_micros(32_768));
+        assert_eq!(edge.snapshot().p99_us, 32_768);
+        edge.add(Duration::from_micros(u64::MAX));
+        let summary = edge.snapshot();
+        assert_eq!(summary.p99_us, u64::MAX);
+        assert_eq!(summary.max_us, u64::MAX);
+    }
 
     #[test]
     fn reconnect_backoff_is_bounded_to_three_attempts() {

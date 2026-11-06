@@ -97,6 +97,30 @@ The recovered stream retained its UTC start and contiguous sample indexes. The d
 python tools/test_recovery.py .\target\release\eipmaster-cli.exe .\.local\recovery-check
 ```
 
+## OpENer compatibility
+
+The Windows CLI captured from the upstream OpENer sample adapter, built with MSVC from revision `0e1ab7ee`. The test launcher binds all adapter sockets to 127.0.0.2, supplies a synthetic MAC address, and fills the 32-byte input assembly with values 0 through 31. The adapter uses the upstream Class 1 stack and sample connection points. [Upstream sample EDS](https://github.com/EIPStackGroup/OpENer/blob/0e1ab7ee5c272950c0dc8daf7793008d7a518912/data/opener_sample_app.eds) · [Upstream sample application](https://github.com/EIPStackGroup/OpENer/blob/0e1ab7ee5c272950c0dc8daf7793008d7a518912/source/src/ports/WIN32/sample_application/sampleapplication.c)
+
+EDS Connection2 resolves to input assembly 100, heartbeat point 152, and configuration instance 151 with zero configuration bytes. Both directions requested 30,000 µs and Forward_Open returned 30,000 µs in both directions. The Identity Object reported vendor 1, type 12, product 65001, revision 2.3, and serial 123456789. The target trace recorded Forward_Close.
+
+The first 60-second run wrote all 2,000 accepted samples with one receive sequence gap, zero duplicates, zero invalid packets, zero timeouts, and zero CSV overruns. Socket spacing was measured separately.
+
+| Direction | p50 µs | p95 µs | p99 µs | Longest µs |
+|---|---:|---:|---:|---:|
+| Scanner O→T send | 29,988 | 30,486 | 35,967 | 46,692 |
+| Scanner T→O receive | 30,412 | 31,886 | 32,435 | 60,705 |
+
+The reproducible run with rotation wrote all 1,989 accepted samples across six CSV parts. It reported 12 receive sequence gaps and zero CSV overruns, duplicates, invalid packets or timeouts. OpENer logged 2,001 sends with no socket send error. This comparison does not identify where the missing datagrams were dropped. The receive p50, p95, p99 and longest gap were 30,726, 31,980, 32,895 and 62,853 µs, respectively.
+
+This check exposed the previous 20,000 µs percentile ceiling. The fixed histogram retains exact microsecond buckets through 32,767 µs and reports a bounded upper estimate for longer intervals. CSV elapsed times independently reproduced the receive percentiles within that resolution.
+
+To repeat the headless test, install CMake and the Visual Studio 2022 C++ toolchain. Use a fresh output directory and a full upstream Git checkout. The tool builds a local copy of the pinned revision and keeps the upstream EDS, logs and CSV parts in the test directory.
+
+```powershell
+git clone https://github.com/EIPStackGroup/OpENer.git .local/opener-upstream
+python tools/test_opener.py .\target\release\eipmaster-cli.exe .\.local\opener-upstream .\.local\opener-check
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

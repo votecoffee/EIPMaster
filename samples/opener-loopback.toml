@@ -1,0 +1,34 @@
+# OpENer sample adapter, Connection2. Use the loopback test launcher.
+device_ip = "127.0.0.2"
+local_ip = "127.0.0.1"
+local_udp_port = 0
+input_instance = 100
+input_size = 32
+output_instance = 152
+output_size = 0
+config_instance = 151
+config_size = 0
+config_hex = ""
+output_hex = ""
+input_only = true
+input_run_idle = false
+output_run_idle = false
+input_priority = 2
+output_priority = 2
+input_rpi_us = 30000
+output_rpi_us = 30000
+
+[selection]
+offset = 0
+kind = "U32"
+
+[[input_fields]]
+name = "first_word_le"
+selection = { offset = 0, kind = "U32" }
+
+[[input_fields]]
+name = "last_word_be"
+selection = { offset = 28, kind = "U32", big_endian = true }
+
+[app]
+rotate_seconds = 10

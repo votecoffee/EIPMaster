@@ -22,7 +22,7 @@ The milestone requires concurrent loopback coverage and compatibility with exist
 
 ## 0.4 Adapter compatibility
 
-- [Verify a second documented adapter family](https://github.com/votecoffee/EIPMaster/issues/7). Start with EDS interpretation, identity, assembly formats, and sustained unicast input-only capture.
+- [Verify a second documented adapter family](https://github.com/votecoffee/EIPMaster/issues/7). The [OpENer software adapter check](VERIFICATION.md#opener-compatibility) covers the upstream EDS, identity, assembly decoding, and sustained unicast input-only capture. Physical device acceptance remains separate.
 - Prioritize Large Forward_Open, electronic keys, routed paths, or multicast when a documented device needs them. Pair each protocol extension with a fixture and device-level evidence.
 
 Device profiles, vendor files, and raw captures belong in the ignored `.local/` directory. [Adapter-compatibility milestone](https://github.com/votecoffee/EIPMaster/milestone/3)

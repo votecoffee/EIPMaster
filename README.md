@@ -109,7 +109,7 @@ big_endian = false
 
 Set either rotation limit to zero to disable it. Each part has the same UTF-8 CSV header. Keep capture armed during a reconnect to retain the UTC origin and sample index. The generation column marks the new connection. Select **Stop capture and flush** to drain the queue.
 
-The live panel separates requested RPIs, Forward_Open actual intervals and socket timing. Capture stats separate intentionally skipped unchanged packets, sequence gaps, duplicates, late and invalid packets, sender deadline skips, local buffer overruns and disk errors. A local overrun leaves a gap in the sample indexes. The queue reserves space up front for packet snapshots. Increasing its sample capacity increases memory use.
+The live panel separates requested RPIs, Forward_Open actual intervals and socket timing. Spacing percentiles use exact microsecond buckets through 32,767 µs and round longer values up by less than 0.4%. The longest gap is measured directly. Capture stats separate intentionally skipped unchanged packets, sequence gaps, duplicates, late and invalid packets, sender deadline skips, local buffer overruns and disk errors. A local overrun leaves a gap in the sample indexes. The queue reserves space up front for packet snapshots. Increasing its sample capacity increases memory use.
 
 ### CLI
 
@@ -154,6 +154,8 @@ cargo +stable-x86_64-pc-windows-msvc test --locked --release
 python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\cli-check
 python tools/test_recovery.py .\target\release\eipmaster-cli.exe .\.local\recovery-check
 ```
+
+The [independent OpENer compatibility check](VERIFICATION.md#opener-compatibility) builds a pinned software adapter and runs a headless 60-second input-only capture using the upstream EDS.
 
 ## Roadmap
 

@@ -1553,19 +1553,9 @@ impl Device {
             if s.intervals == 0 {
                 continue;
             }
-            let percentile = |value: u64| {
-                if value >= 20_000 {
-                    "≥20000".to_string()
-                } else {
-                    value.to_string()
-                }
-            };
             ui.label(format!(
                 "{label} spacing in µs  ·  p50 {}  ·  p95 {}  ·  p99 {}  ·  longest {}",
-                percentile(s.p50_us),
-                percentile(s.p95_us),
-                percentile(s.p99_us),
-                s.max_us
+                s.p50_us, s.p95_us, s.p99_us, s.max_us
             ));
         }
         ui.separator();
