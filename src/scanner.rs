@@ -294,6 +294,9 @@ pub struct Status {
     pub network_error: Option<String>,
     pub cip_error: Option<String>,
     pub actual: Option<(u32, u32)>,
+    pub forward_open_exchange_us: Option<u64>,
+    pub first_udp_after_open_us: Option<u64>,
+    pub first_input_after_open_us: Option<u64>,
     pub last_input: Option<Instant>,
     pub input: Vec<u8>,
     pub value: Option<Value>,
@@ -325,6 +328,28 @@ pub struct SendTiming {
     pub max_dispatch_lateness_us: Option<u64>,
     pub max_send_call_us: u64,
     pub send_calls_at_or_over_rpi: u64,
+    #[serde(skip)]
+    pub first_send_after_open_us: Option<u64>,
+}
+
+/// Monotonic host timings for the explicit exchange and the start of cyclic I/O.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct StartupTiming {
+    pub forward_open_exchange_us: u64,
+    pub first_send_after_open_us: Option<u64>,
+    pub first_udp_after_open_us: Option<u64>,
+    pub first_input_after_open_us: Option<u64>,
+}
+
+impl Status {
+    pub fn startup_timing(&self, send_timing: SendTiming) -> Option<StartupTiming> {
+        Some(StartupTiming {
+            forward_open_exchange_us: self.forward_open_exchange_us?,
+            first_send_after_open_us: send_timing.first_send_after_open_us,
+            first_udp_after_open_us: self.first_udp_after_open_us,
+            first_input_after_open_us: self.first_input_after_open_us,
+        })
+    }
 }
 
 struct InputTimes {
@@ -773,7 +798,14 @@ fn run(
     if shared.stop.load(Relaxed) {
         return Ok(());
     }
-    let (body, envelope) = session.cip(0x54, 6, &open.encode(), Some(udp.local_addr()?))?;
+    let local_addr = udp.local_addr()?;
+    let request = open.encode();
+    let open_started = Instant::now();
+    let open_result = session.cip(0x54, 6, &request, Some(local_addr));
+    let open_completed = Instant::now();
+    shared.status.lock().unwrap().forward_open_exchange_us =
+        Some((open_completed - open_started).as_micros() as u64);
+    let (body, envelope) = open_result?;
     let close = ForwardCloseRequest {
         priority_tick: open.priority_tick,
         timeout_ticks: open.timeout_ticks,
@@ -807,13 +839,21 @@ fn run(
         }
         thread::scope(|scope| {
             let sender = scope.spawn(|| {
-                let result = produce(&udp, peer, cfg.output_run_idle, &reply, shared, schedule);
+                let result = produce(
+                    &udp,
+                    peer,
+                    cfg.output_run_idle,
+                    &reply,
+                    open_completed,
+                    shared,
+                    schedule,
+                );
                 if result.is_err() {
                     shared.stop.store(true, Relaxed);
                 }
                 result
             });
-            let result = receive(&udp, cfg, &reply, slot, generation, shared);
+            let result = receive(&udp, cfg, &reply, open_completed, slot, generation, shared);
             shared.stop.store(true, Relaxed);
             let tx = sender
                 .join()
@@ -865,6 +905,7 @@ fn produce(
     peer: SocketAddr,
     header: bool,
     reply: &ForwardOpenResponse,
+    open_completed: Instant,
     shared: &Shared,
     schedule: Schedule,
 ) -> Result<()> {
@@ -906,6 +947,9 @@ fn produce(
         timing.max_send_call_us = timing.max_send_call_us.max(call_time.as_micros() as u64);
         timing.send_calls_at_or_over_rpi += u64::from(call_time >= period);
         result?;
+        timing
+            .first_send_after_open_us
+            .get_or_insert_with(|| (stamp - open_completed).as_micros() as u64);
         if let Some(prior) = last.replace(stamp) {
             spacing.add(stamp - prior);
         }
@@ -1037,6 +1081,7 @@ fn receive(
     udp: &UdpSocket,
     cfg: &Settings,
     reply: &ForwardOpenResponse,
+    open_completed: Instant,
     slot: &Slot,
     generation: u64,
     shared: &Shared,
@@ -1065,7 +1110,10 @@ fn receive(
         let stamp = Instant::now();
         match result {
             Ok(Some((length, addr))) => {
-                last_udp = Some(stamp);
+                if last_udp.replace(stamp).is_none() {
+                    status.first_udp_after_open_us =
+                        Some((stamp - open_completed).as_micros() as u64);
+                }
                 match parse_packet(
                     &packet[..length],
                     reply.t_to_o_connection_id,
@@ -1093,7 +1141,12 @@ fn receive(
                                 spacing.add(stamp - last);
                             }
                             status.last_input = Some(stamp);
-                            shared.input_times.record(stamp, status.valid == 0);
+                            let first = status.valid == 0;
+                            if first {
+                                status.first_input_after_open_us =
+                                    Some((stamp - open_completed).as_micros() as u64);
+                            }
+                            shared.input_times.record(stamp, first);
                             status.state = "Receiving";
                             status.valid += 1;
                             status.input.clear();

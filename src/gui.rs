@@ -1609,6 +1609,23 @@ impl Device {
                     }
                     ui.end_row();
                 });
+            if let Some(startup) = self.status.startup_timing(self.send_timing) {
+                ui.small(format!(
+                    "Forward_Open exchange {:.3} ms",
+                    startup.forward_open_exchange_us as f64 / 1000.0
+                ));
+                if self.status.actual.is_some() {
+                    let show = |us: Option<u64>| {
+                        us.map_or_else(|| "—".into(), |us| format!("{:.3} ms", us as f64 / 1000.0))
+                    };
+                    ui.small(format!(
+                        "After Forward_Open · First O->T send {} · First UDP {} · First valid input {}",
+                        show(startup.first_send_after_open_us),
+                        show(startup.first_udp_after_open_us),
+                        show(startup.first_input_after_open_us)
+                    ));
+                }
+            }
             let timeout = active.connection_timeout(self.status.actual.map(|(_, input)| input));
             if let (Some(factor), Some(us)) = (timeout.factor, timeout.receive_watchdog_us) {
                 ui.small(format!(
@@ -2311,6 +2328,13 @@ mod tests {
         assert_eq!(link["requested_to_us"].as_integer(), Some(1000));
         assert_eq!(link["actual_ot_us"].as_integer(), Some(1250));
         assert_eq!(link["actual_to_us"].as_integer(), Some(1500));
+        let startup = &link["startup_timing"];
+        assert!(startup["forward_open_exchange_us"].is_integer());
+        assert!(startup["first_send_after_open_us"].is_integer());
+        assert_eq!(
+            startup["first_udp_after_open_us"],
+            startup["first_input_after_open_us"]
+        );
         let timeout = &link["connection_timeout"];
         assert_eq!(timeout["multiplier_code"].as_integer(), Some(4));
         assert_eq!(

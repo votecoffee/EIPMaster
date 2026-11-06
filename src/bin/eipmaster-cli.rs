@@ -5,7 +5,7 @@ use assembly_scanner::{
     preflight,
     scanner::{
         CloseOutcome, Connection, Identity, IdentityKey, IdentityPin, ReceiveTimeout, Reconnect,
-        Schedule, SendTiming, Spacing, Status, read_identity,
+        Schedule, SendTiming, Spacing, StartupTiming, Status, read_identity,
     },
     settings_file::{self, Preferences},
 };
@@ -278,6 +278,7 @@ struct Report {
     network_error: Option<String>,
     disk_error: Option<String>,
     identity: Option<Identity>,
+    startup_timing: Option<StartupTiming>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
     send_timing: SendTiming,
@@ -322,6 +323,7 @@ struct AttemptReport {
     identity_error: Option<String>,
     cip_error: Option<String>,
     network_error: Option<String>,
+    startup_timing: Option<StartupTiming>,
     receive_spacing: Spacing,
     send_spacing: Spacing,
     send_timing: SendTiming,
@@ -373,6 +375,7 @@ impl Attempt {
             identity_error: status.identity_error.clone(),
             cip_error: status.cip_error.clone(),
             network_error: status.network_error.clone(),
+            startup_timing: status.startup_timing(self.send_timing),
             receive_spacing: status.spacing,
             send_spacing: self.send_spacing,
             send_timing: self.send_timing,
@@ -525,6 +528,7 @@ fn capture(
         .find(|run| run.status.valid != 0)
         .map(|run| &run.status);
     let (actual_ot_us, actual_to_us) = status.actual.unzip();
+    let send_timing = last.map_or_else(SendTiming::default, |run| run.send_timing);
     let sum = |field: fn(&Attempt) -> u64| attempts.iter().map(field).sum();
     let report = Report {
         state: status.state,
@@ -569,9 +573,10 @@ fn capture(
         network_error: status.network_error.clone(),
         disk_error: sink.error.lock().unwrap().clone(),
         identity: status.identity.clone(),
+        startup_timing: status.startup_timing(send_timing),
         receive_spacing: status.spacing,
         send_spacing: last.map_or_else(Spacing::default, |run| run.send_spacing),
-        send_timing: last.map_or_else(SendTiming::default, |run| run.send_timing),
+        send_timing,
         attempts: if preferences.auto_reconnect {
             attempts
                 .iter()

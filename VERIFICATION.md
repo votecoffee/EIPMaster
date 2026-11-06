@@ -360,6 +360,22 @@ Receive p50, p95, p99, and longest spacing were 1,033, 1,251, 1,619, and 4,960 m
 
 The recorder test exercised timestamps before, at, and after the cutoff across generations. The GUI backend verified that its report counts the post-deadline packets when polling is delayed. Headless qualification compares CSV rows with in-window packets and retains the full connection metrics. The recovery test let the window expire during reconnect backoff and verified that the scanner opened no further connection. The independent 30 ms OpENer check saved 101 rows in its three-second window and confirmed Forward_Close.
 
+## Startup timing
+
+The Windows localhost fixture delayed its Forward_Open reply by 50 ms and waited 80 ms after the first heartbeat before sending input. The scanner requested and negotiated 8 ms in both directions. It wrote 125 rows in a one-second capture with a confirmed Forward_Close, zero sequence gaps, zero watchdog timeouts, and zero buffer overruns.
+
+| Fixture case | Forward_Open exchange (µs) | First O-to-T send (µs) | First received UDP (µs) | First valid input (µs) |
+|---|---:|---:|---:|---:|
+| Delayed reply and input | 51,820 | 594 | 81,036 | 81,036 |
+| No input traffic | 998 | 495 | — | — |
+| Malformed input | 1,415 | 517 | 738 | — |
+| CIP rejection | 226 | — | — | — |
+| Identity mismatch | — | — | — | — |
+
+The three I/O columns are measured from the end of the Forward_Open exchange, using the scanner host's monotonic clock. The malformed and quiet fixtures each reached the first-input timeout. The identity mismatch stopped before Forward_Open. Headless regression tests also check the saved GUI report and the timing entries before and after a CLI reconnect. These are localhost measurements.
+
+Three one-second headless qualification trials requested and negotiated 1,000 microseconds in both directions. They wrote 998, 996, and 974 rows, with receive p99 spacing of 1,488, 1,533, and 2,028 microseconds and longest gaps of 2,403, 3,499, and 5,191 microseconds. All confirmed Forward_Close and had zero sequence gaps, watchdog timeouts, and CSV overruns. The fixture skipped 2, 5, and 27 send slots before assigning sequence numbers.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

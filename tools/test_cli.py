@@ -352,10 +352,29 @@ def main():
     capture = [exe, "capture", legacy]
     mismatch, adapter = with_adapter(root, "mismatch", [*capture, root / "mismatch", "1", "0:12:99"])
     assert mismatch.returncode == 1
-    assert "Identity mismatch" in tomllib.loads(mismatch.stdout)["identity_error"]
+    report = tomllib.loads(mismatch.stdout)
+    assert "Identity mismatch" in report["identity_error"]
     assert "ot_requested_us" not in adapter
-    assert "last_input_hex" not in tomllib.loads(mismatch.stdout)
-    assert "forward_close" not in tomllib.loads(mismatch.stdout)
+    assert "last_input_hex" not in report
+    assert "forward_close" not in report
+    assert "startup_timing" not in report
+
+    rejected, adapter = with_adapter(root, "reject", [*capture, root / "reject", "1", "0:12:1"], "reject")
+    report = tomllib.loads(rejected.stdout)
+    assert rejected.returncode == 1 and report["cip_error"] and "ot_requested_us" in adapter
+    assert set(report["startup_timing"]) == {"forward_open_exchange_us"}
+
+    delayed, adapter = with_adapter(
+        root, "delayed-start", [*capture, root / "delayed-start", "1", "0:12:1"], "delayed-start"
+    )
+    assert delayed.returncode == 0, (delayed.stdout, delayed.stderr)
+    report = tomllib.loads(delayed.stdout)
+    startup = report["startup_timing"]
+    assert startup["forward_open_exchange_us"] >= 40_000
+    assert startup["first_udp_after_open_us"] == startup["first_input_after_open_us"]
+    assert startup["first_input_after_open_us"] >= startup["first_send_after_open_us"] + 70_000
+    assert adapter["forward_close"]
+    check_capture_window(report, list(rows(parts_for(Path(report["csv_prefix"])))))
 
     for mode in ("no-input", "invalid-input"):
         no_input, adapter = with_adapter(
@@ -368,11 +387,16 @@ def main():
         assert timeout["waiting_for_first_input"] and timeout["limit_us"] == 2_000_000
         assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
         assert "last_sequence" not in timeout
+        startup = report["startup_timing"]
+        assert "forward_open_exchange_us" in startup and "first_send_after_open_us" in startup
+        assert "first_input_after_open_us" not in startup
         if mode == "invalid-input":
             assert adapter["to_sent"] >= report["invalid"] > 0
             assert timeout["last_udp_age_us"] < timeout["valid_input_silence_us"]
+            assert "first_udp_after_open_us" in startup
         else:
             assert report["invalid"] == adapter["to_sent"] == 0 and "last_udp_age_us" not in timeout
+            assert "first_udp_after_open_us" not in startup
 
     success, adapter = with_adapter(root, "capture", [*capture, root / "capture", "2", "0:12:1"])
     assert success.returncode == 0, (success.stdout, success.stderr)

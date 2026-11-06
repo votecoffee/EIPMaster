@@ -209,6 +209,11 @@ def concurrent(exe, root):
     assert (prior["state"], restored["state"]) == ("Timed out", "Closed")
     assert prior["forward_close"] == restored["forward_close"] == {"outcome": "confirmed"}
     assert (prior["generation"], restored["generation"]) == (1, 2)
+    assert recovered["startup_timing"] == restored["startup_timing"]
+    for attempt in (prior, restored):
+        startup = attempt["startup_timing"]
+        assert "forward_open_exchange_us" in startup and "first_send_after_open_us" in startup
+        assert startup["first_udp_after_open_us"] == startup["first_input_after_open_us"]
     timeout = prior["receive_timeout"]
     assert not timeout["waiting_for_first_input"]
     assert timeout["limit_us"] == 256_000

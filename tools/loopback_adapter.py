@@ -99,7 +99,7 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
             prior_sequence = sequence
             received.append(stamp)
             if deadline is None:
-                deadline = stamp
+                deadline = stamp + (80_000_000 if mode == "delayed-start" else 0)
         now = time.perf_counter_ns()
         if deadline is not None and now >= deadline:
             slots = (now - deadline) // period + 1
@@ -196,6 +196,8 @@ def serve(tcp, udp, mode, report, serial_delta=0):
                                             ot_api, to_api, 0, 0)
                         response = rr_reply(b"\xD4\0\0\0" + reply,
                                             (0x8000, sockaddr(adapter_ip, udp.getsockname()[1])))
+                        if mode == "delayed-start":
+                            time.sleep(0.05)
                         io = threading.Thread(target=udp_loop,
                                               args=(udp, (scanner_ip, port), to, to_api, udp_mode, value_base, stop, report))
                         io.start()
@@ -236,6 +238,7 @@ def main():
         "stall-close-reject", "qualify-close-reject",
         "slow-input", "pause-different-api",
         "identity-then-owner",
+        "delayed-start",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
