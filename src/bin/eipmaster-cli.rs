@@ -1,5 +1,5 @@
 use assembly_scanner::{
-    capture::{Capture, FieldSummary, MAX_CAPTURE_SECONDS, Slot},
+    capture::{Capture, FieldSummary, MAX_CAPTURE_SECONDS, Options, Slot},
     eds,
     model::{ConnectionTimeout, Settings},
     preflight,
@@ -262,6 +262,7 @@ struct Report {
     sent: u64,
     skipped_deadlines: u64,
     seen: u64,
+    after_capture_deadline: u64,
     unchanged: u64,
     written: u64,
     buffer_overruns: u64,
@@ -286,6 +287,7 @@ struct Report {
 
 impl Report {
     fn completed(&self) -> bool {
+        // The cutoff prevents another attempt from starting after the final window closes.
         let final_accepted = self
             .attempts
             .last()
@@ -297,9 +299,10 @@ impl Report {
                 .is_some_and(CloseOutcome::is_confirmed)
             && self.duration_reached
             && !self.interrupted
-            && final_accepted != 0
+            && final_accepted > self.after_capture_deadline
             && self.written != 0
-            && self.written + self.unchanged == self.accepted
+            && self.seen + self.after_capture_deadline == self.accepted
+            && self.written + self.unchanged == self.seen
             && self.disk_error.is_none()
     }
 }
@@ -407,12 +410,11 @@ fn capture(
         .open(directory.join("capture.toml"))
         .map_err(|e| e.to_string())?;
     let slot = Slot::default();
-    let mut capture = Capture::start(
-        &slot,
-        preferences.capture_options(PathBuf::from(directory)),
-        settings,
-    )
-    .map_err(|e| e.to_string())?;
+    let options = Options {
+        duration_seconds: seconds,
+        ..preferences.capture_options(PathBuf::from(directory))
+    };
+    let mut capture = Capture::start(&slot, options, settings).map_err(|e| e.to_string())?;
     let sink = capture.sink.clone();
     let mut attempts = Vec::new();
     let mut reconnect = None;
@@ -420,9 +422,12 @@ fn capture(
         key: expected.key,
         serial,
     });
-    let mut deadline = None;
     let mut duration_reached = false;
     'capture: while !interrupt::requested() {
+        if sink.deadline().is_some_and(|end| Instant::now() >= end) {
+            duration_reached = true;
+            break;
+        }
         let connection = match pin {
             Some(pin) => Connection::start_pinned_input(
                 settings.clone(),
@@ -461,12 +466,7 @@ fn capture(
                 connection.stop();
                 break;
             }
-            if deadline.is_none()
-                && let Some(first) = connection.first_input_at()
-            {
-                deadline = Some(first + Duration::from_secs(seconds));
-            }
-            if deadline.is_some_and(|end| Instant::now() >= end) {
+            if sink.deadline().is_some_and(|end| Instant::now() >= end) {
                 duration_reached = true;
                 connection.stop();
                 break;
@@ -501,7 +501,7 @@ fn capture(
                 break 'capture;
             }
             let now = Instant::now();
-            if deadline.is_some_and(|end| now >= end) {
+            if sink.deadline().is_some_and(|end| now >= end) {
                 duration_reached = true;
                 break 'capture;
             }
@@ -552,6 +552,7 @@ fn capture(
         sent: sum(|run| run.sent),
         skipped_deadlines: sum(|run| run.skipped),
         seen: sink.seen.load(Relaxed),
+        after_capture_deadline: sink.after_capture_deadline.load(Relaxed),
         unchanged: sink.unchanged.load(Relaxed),
         written: sink.written.load(Relaxed),
         buffer_overruns: sink.overrun.load(Relaxed),

@@ -35,13 +35,26 @@ def with_adapter(root, case, command, mode="normal"):
             adapter.wait()
 
 
+def check_capture_window(capture, samples):
+    assert len(samples) == capture["written"]
+    assert capture["accepted"] == capture["seen"] + capture["after_capture_deadline"]
+    assert capture["seen"] == capture["written"] + capture["unchanged"] + capture["buffer_overruns"]
+    if samples:
+        assert int(samples[-1][1]) - int(samples[0][1]) <= capture["duration_seconds"] * 1_000_000
+
+
 def check_spacing(capture, samples):
+    check_capture_window(capture, samples)
     receive = capture["receive_spacing"]
     send = capture["send_spacing"]
     assert receive["intervals"] == capture["accepted"] - 1
     assert send["intervals"] == capture["sent"] - 1
     timestamps = [int(row[1]) for row in samples]
-    assert abs(receive["span_us"] - (timestamps[-1] - timestamps[0])) <= 1
+    span_us = timestamps[-1] - timestamps[0]
+    after_deadline = capture["after_capture_deadline"]
+    assert receive["span_us"] >= span_us - 1
+    if after_deadline == 0:
+        assert abs(receive["span_us"] - span_us) <= 1
     for spacing, rpi in [(receive, capture["actual_to_us"]), (send, capture["actual_ot_us"])]:
         span = spacing["span_us"]
         rate = spacing["observed_packets_per_second"]
@@ -55,7 +68,7 @@ def check_spacing(capture, samples):
         # to the threshold may be on either side before truncation.
         assert sum(gap > threshold for gap in intervals) <= receive[key] <= sum(
             gap >= threshold for gap in intervals
-        )
+        ) + after_deadline
         assert 0 <= send[key] <= send["intervals"]
         assert bool(send[key]) == (send["max_us"] >= multiple * capture["actual_ot_us"])
 
@@ -97,7 +110,8 @@ def check_timeout_multiplier(exe, root, legacy):
             "receive_watchdog_us": 1500 * factor,
         }
         assert fixture["forward_close"] and report["forward_close"] == {"outcome": "confirmed"}
-        assert report["accepted"] == report["written"] > 0 and report["buffer_overruns"] == 0
+        assert report["written"] == report["seen"] > 0 and report["buffer_overruns"] == 0
+        check_capture_window(report, list(rows(parts_for(Path(report["csv_prefix"])))))
         if code == 3:
             assert result.returncode == 1 and report["state"] == "Timed out"
             assert report["receive_timeout"]["limit_us"] == 48_000
@@ -131,7 +145,8 @@ def check_close_failures(capture_command, root):
                 assert "short reply" in close["error"]
         parts = parts_for(Path(report["csv_prefix"]))
         samples = list(rows(parts))
-        assert len(samples) == report["written"] == report["accepted"] > 0
+        assert len(samples) == report["written"] == report["seen"] > 0
+        check_capture_window(report, samples)
     print("Forward_Close checks: rejection, mismatched IDs, short reply, missing reply, and watchdog preserved")
 
 
@@ -173,7 +188,7 @@ def check_qualification(exe, root):
             assert adapter["ot_requested_us"] == adapter["to_requested_us"] == rpi
             assert capture["state"] == "Closed" and capture["duration_reached"]
             assert capture["forward_close"] == {"outcome": "confirmed"}
-            assert capture["written"] == capture["accepted"] == capture["seen"] > 50
+            assert capture["written"] == capture["seen"] > 50
             assert capture["unchanged"] == 0 and "attempts" not in capture
             parts = parts_for(Path(capture["csv_prefix"]))
             samples = list(rows(parts))
@@ -240,7 +255,9 @@ def check_qualification(exe, root):
     target = receipt["runs"][1]
     assert any("Forward_Close rejected" in error for error in target["errors"])
     assert target["capture"]["forward_close"]["extended_status"] == [0x0107]
-    assert target["capture"]["accepted"] == target["capture"]["written"] > 0
+    capture = target["capture"]
+    assert capture["written"] == capture["seen"] > 0
+    check_capture_window(capture, list(rows(parts_for(Path(capture["csv_prefix"])))))
 
     for name, args, expected_error in [
         ("wrong-path", ["direct", f"0:12:1:{serial}"], "non-loopback addresses"),
@@ -365,10 +382,15 @@ def main():
     legacy_parts = parts_for(Path(report["csv_prefix"]))
     assert read_header(legacy_parts[0]) == METADATA + ["value"]
     samples = list(rows(legacy_parts))
-    assert len(samples) == report["written"] == report["accepted"] > 100
+    assert len(samples) == report["written"] == report["seen"] > 100
     assert [int(row[2]) for row in samples] == list(range(len(samples)))
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
-    assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
+    last_input = int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little")
+    assert last_input == int(report["last_value"])
+    if report["after_capture_deadline"] == 0:
+        assert last_input == int(samples[-1][6])
+    else:
+        assert last_input >= int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
     assert adapter["timeout_multiplier_code"] == report["connection_timeout"]["multiplier_code"] == 3
     assert report["forward_close"] == {"outcome": "confirmed"}
@@ -388,7 +410,7 @@ def main():
     slow_report = tomllib.loads(slow.stdout)
     assert slow_report["actual_to_us"] == args.rpi_us
     assert slow_report["sequence_gaps"] == slow_report["buffer_overruns"] == 0
-    assert slow_report["written"] == slow_report["accepted"]
+    assert slow_report["written"] == slow_report["seen"]
     slow_spacing = slow_report["receive_spacing"]
     assert 35 < slow_spacing["percent_of_negotiated_rate"] < 55
     slow_samples = list(rows(parts_for(Path(slow_report["csv_prefix"]))))
@@ -430,6 +452,7 @@ def main():
     assert header == METADATA + [name for name, *_ in fields]
     multi_samples = list(rows(parts))
     assert len(multi_samples) == multi_report["written"] > 100 and adapter["forward_close"]
+    check_capture_window(multi_report, multi_samples)
     for row in multi_samples:
         expected = int(row[4]) // 16
         payload = expected.to_bytes(4, "little")
@@ -455,7 +478,7 @@ def main():
     changed = list(rows(parts))
     assert len(changed) == filtered_report["written"] > 10 and adapter["forward_close"]
     assert filtered_report["unchanged"] > len(changed)
-    assert filtered_report["written"] + filtered_report["unchanged"] == filtered_report["accepted"]
+    check_capture_window(filtered_report, changed)
     assert [int(row[2]) for row in changed] == list(range(len(changed)))
     check_field_summaries(filtered_report, ["counter", "low_bit"], changed)
     for i, row in enumerate(changed):

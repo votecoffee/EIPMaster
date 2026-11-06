@@ -352,6 +352,14 @@ python tools/loopback_adapter.py .local/gui-timed-adapter.json --mode normal
 cargo test --locked --release --bin assembly-scanner timed_gui_capture_finishes_after_first_input_even_when_polling_is_delayed -- --ignored --nocapture
 ```
 
+## Headless capture cutoff
+
+A ten-second headless loopback capture requested and negotiated 1,000 microseconds in both directions. It confirmed Forward_Close and saved 9,930 rows across five CSV parts. The CSV first-to-last sample span was 9.999193 seconds. The receive socket observed 9,939 accepted packets over 10.008444 seconds, including nine packets after the recording deadline. The report-backed join verified all saved rows.
+
+Receive p50, p95, p99, and longest spacing were 1,033, 1,251, 1,619, and 4,960 microseconds. There were zero sequence gaps, timeouts, or CSV overruns. The scanner skipped 54 send slots and the fixture skipped 70. These are loopback socket measurements.
+
+The recorder test exercised timestamps before, at, and after the cutoff across generations. The GUI backend verified that its report counts the post-deadline packets when polling is delayed. Headless qualification compares CSV rows with in-window packets and retains the full connection metrics. The recovery test let the window expire during reconnect backoff and verified that the scanner opened no further connection. The independent 30 ms OpENer check saved 101 rows in its three-second window and confirmed Forward_Close.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

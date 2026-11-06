@@ -114,6 +114,7 @@ def interrupted_capture(kernel, exe, root, profile, case, command, event, fixtur
     assert result["state"] == ("Timed out" if fixture_mode == "stall" else "Closed")
     assert result["forward_close"] == {"outcome": "confirmed"}
     assert result["written"] == result["seen"] == result["accepted"] > 0
+    assert result["after_capture_deadline"] == 0
     assert result["buffer_overruns"] == 0 and "disk_error" not in result
     if fixture_mode == "stall":
         assert len(result["attempts"]) == 1 and result["timeouts"] == 1

@@ -84,9 +84,11 @@ fn trial_errors(report: &Report, requested_us: u32) -> Vec<String> {
             errors.push(format!("{counter} {name}"));
         }
     }
-    if report.seen != report.accepted || report.written != report.accepted || report.unchanged != 0
+    if report.seen + report.after_capture_deadline != report.accepted
+        || report.written != report.seen
+        || report.unchanged != 0
     {
-        errors.push("CSV row counts differ from accepted packets".into());
+        errors.push("CSV row counts differ from the in-window input packets".into());
     }
     errors
 }

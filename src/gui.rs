@@ -2169,10 +2169,12 @@ mod tests {
         assert_eq!(capture["duration_seconds"].as_integer(), Some(1));
         assert_eq!(capture["duration_reached"].as_bool(), Some(true));
         assert_eq!(capture["written"].as_integer(), Some(written as i64));
+        let after_deadline = capture["after_capture_deadline"].as_integer().unwrap();
+        assert!(after_deadline > 0);
         let link = &report["connection"];
         assert_eq!(link["forward_close"]["outcome"].as_str(), Some("confirmed"));
         let accepted = link["accepted"].as_integer().unwrap();
-        assert!(accepted > written as i64);
+        assert!(accepted >= written as i64 + after_deadline);
         eprintln!("Timed GUI capture saved {written} rows of {accepted} connection packets");
         remove_capture_directory(directory);
     }

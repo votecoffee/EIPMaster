@@ -218,7 +218,8 @@ def concurrent(exe, root):
     assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
     assert timeout["last_udp_age_us"] <= timeout["valid_input_silence_us"]
     assert "receive_timeout" not in restored and "receive_timeout" not in recovered
-    assert recovered["accepted"] == recovered["written"] == prior["accepted"] + restored["accepted"]
+    assert recovered["accepted"] == prior["accepted"] + restored["accepted"]
+    assert recovered["accepted"] == recovered["written"] + recovered["after_capture_deadline"]
     assert all("disk_error" not in report for report in (healthy, recovered))
     assert "disk_error" in disk and not disk["duration_reached"]
     assert disk["seen"] > disk["written"]
@@ -237,6 +238,7 @@ def concurrent(exe, root):
     assert {row[3] for row in h} == {row[3] for row in d} == {"1"}
     first_recovered = next(index for index, row in enumerate(r) if row[3] == "2")
     assert first_recovered == prior["accepted"] and {row[3] for row in r} == {"1", "2"}
+    assert int(r[-1][1]) - int(r[0][1]) <= recovered["duration_seconds"] * 1_000_000
     assert int(r[first_recovered - 1][4]) == timeout["last_sequence"]
     assert timestamp(r[first_recovered]) - timestamp(r[first_recovered - 1]) >= timedelta(seconds=1)
     assert timestamp(h[0]) < min(timestamp(d[-1]), timestamp(r[first_recovered - 1]))
@@ -266,6 +268,20 @@ def replacement(exe, root):
     print("Same-model replacement rejected before Forward_Open", flush=True)
 
 
+def deadline_during_retry(exe, root):
+    name = "deadline-during-retry"
+    with ExitStack() as stack:
+        fixture = adapter(stack, root, name, "127.0.0.1", "stall")
+        run = capture(stack, exe, root, name, "127.0.0.1", 1, 0)
+        report = receipt(run, root, name, 1)
+        target = fixture_report(fixture)
+    assert report["state"] == "Timed out" and report["duration_reached"]
+    assert len(report["attempts"]) == 1 and report["after_capture_deadline"] == 0
+    assert report["accepted"] == report["written"] > 0
+    assert target["forward_close"]
+    print("Capture deadline expired during reconnect backoff without opening another connection", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=Path)
@@ -275,6 +291,7 @@ def main():
     root.mkdir(parents=True)
     concurrent(args.exe.resolve(), root)
     replacement(args.exe.resolve(), root)
+    deadline_during_retry(args.exe.resolve(), root)
     check_gui_report_join(root)
 
 

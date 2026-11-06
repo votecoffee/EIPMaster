@@ -55,6 +55,7 @@ pub struct Sink {
     stop: AtomicBool,
     failed: AtomicBool,
     pub seen: AtomicU64,
+    pub after_capture_deadline: AtomicU64,
     pub unchanged: AtomicU64,
     next_index: AtomicU64,
     pub overrun: AtomicU64,
@@ -109,6 +110,7 @@ impl Sink {
         if let Some(timer) = &self.timer
             && stamp >= *timer.deadline.get_or_init(|| stamp + timer.duration)
         {
+            self.after_capture_deadline.fetch_add(1, Relaxed);
             return;
         }
         self.seen.fetch_add(1, Relaxed);
@@ -230,6 +232,7 @@ impl Capture {
             stop: false.into(),
             failed: false.into(),
             seen: 0.into(),
+            after_capture_deadline: 0.into(),
             unchanged: 0.into(),
             next_index: 0.into(),
             overrun: 0.into(),
@@ -637,6 +640,7 @@ mod tests {
         sink.record(end + Duration::from_secs(1), 3, 1, 1, &4u32.to_le_bytes());
         capture.stop(&slot);
         assert_eq!(capture.sink.seen.load(Relaxed), 2);
+        assert_eq!(capture.sink.after_capture_deadline.load(Relaxed), 2);
         assert_eq!(capture.sink.written.load(Relaxed), 2);
         assert_eq!(capture.sink.field_summaries()[0].last_value, "2");
         for file in fs::read_dir(&dir).unwrap() {

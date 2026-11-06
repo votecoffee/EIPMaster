@@ -105,18 +105,23 @@ def check_capture(report, seconds):
     assert "disk_error" not in report
     parts = parts_for(Path(report["csv_prefix"]))
     samples = list(rows(parts, METADATA + ["first_word_le", "last_word_be"]))
-    assert len(samples) == report["written"] == report["accepted"] >= seconds * 30
+    assert len(samples) == report["written"] == report["seen"] >= seconds * 30
+    after_deadline = report["after_capture_deadline"]
+    assert report["accepted"] == report["seen"] + after_deadline
     assert seconds <= 10 or len(parts) > 1
     assert all((int(row[2]), int(row[3]), int(row[6]), int(row[7])) ==
                (index, 1, 0x03020100, 0x1C1D1E1F) for index, row in enumerate(samples))
     elapsed = [int(row[1]) for row in samples]
+    assert elapsed[-1] - elapsed[0] <= seconds * 1_000_000
     gaps = sorted(later - earlier for earlier, later in zip(elapsed, elapsed[1:]))
     receive = report["receive_spacing"]
-    assert receive["intervals"] == len(gaps) and abs(receive["max_us"] - gaps[-1]) <= 1
-    for pct in (50, 95, 99):
-        expected = gaps[(len(gaps) * pct + 99) // 100 - 1]
-        # CSV elapsed times are truncated separately. The coarse histogram rounds upward.
-        assert expected - 1 <= receive[f"p{pct}_us"] <= expected + expected // 256 + 1
+    assert receive["intervals"] == len(gaps) + after_deadline
+    if after_deadline == 0:
+        assert abs(receive["max_us"] - gaps[-1]) <= 1
+        for pct in (50, 95, 99):
+            expected = gaps[(len(gaps) * pct + 99) // 100 - 1]
+            # CSV elapsed times are truncated separately. The coarse histogram rounds upward.
+            assert expected - 1 <= receive[f"p{pct}_us"] <= expected + expected // 256 + 1
     print(f"{len(samples)} rows in {len(parts)} parts, {report['sequence_gaps']} sequence gaps, "
           f"{report['buffer_overruns']} overruns")
     print(f"Receive spacing (µs) {receive}")
@@ -142,7 +147,9 @@ def main():
     checked = call(cli, root, "preflight", "validate", PROFILE, eds, "Connection2")
     assert checked["connection_valid"] and checked["capture_config_valid"]
     assert not checked["requests_output_ownership"] and checked["configuration_bytes"] == 0
-    assert all(item["state"] == "eds" for item in checked["origins"])
+    origins = {item["field"]: item["state"] for item in checked["origins"]}
+    assert origins.pop("Timeout multiplier code") == "manual"
+    assert set(origins.values()) == {"eds"}
     with run_adapter(adapter, root) as log:
         identity = call(cli, root, "identity", "identity", ADAPTER, "127.0.0.1")["identity"]
         assert (identity["vendor"], identity["device_type"], identity["code"], identity["serial"]) == (
