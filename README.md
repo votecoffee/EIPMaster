@@ -119,6 +119,10 @@ The live panel separates requested RPIs, Forward_Open actual intervals and socke
 
 Capture stats separate intentionally skipped unchanged packets, sequence gaps, duplicates, late and invalid packets, sender deadline skips, local buffer overruns and disk errors. The device panel shows the terminal silence and threshold when valid input times out. A local overrun leaves a gap in the sample indexes. The queue reserves space up front for packet snapshots. Increasing its sample capacity increases memory use.
 
+For a timed GUI bench run, start CSV capture before connecting. At the end, disconnect and wait for the final connection state, then select **Stop capture and flush** and **Save run report**. The app creates a `-report.toml` file beside the CSV parts. It records the adapter identity, requested and actual intervals, spacing, transport errors, and CSV counts. Saving a report preserves any file already at that path.
+
+The connection section covers the full lifetime of the latest connection that overlapped the capture. The capture section totals the CSV counts across all parts and records the range of connection generations while CSV was armed. Use one connection per capture when comparing timing across bench trials.
+
 ### CLI
 
 The console executable uses the same EDS importer, scanner and CSV writer as the GUI. `eds` lists imported profiles, resolved settings, assembly definition widths, and unsupported features offline. `validate` checks a TOML profile offline and optionally compares it to one EDS connection profile. It reports connection validity and capture configuration separately. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.

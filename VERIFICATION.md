@@ -229,6 +229,22 @@ The scanner skipped 1,128 scheduled sends and the fixture skipped 1,244. Both sk
 
 The 8 ms and 1 ms CLI checks cross-checked the receive span and long-interval counts against CSV timestamps. The qualification regression also checked a fixture returning 1,250 microseconds O-to-T and 1,500 microseconds T-to-O for a 1,000-microsecond request. The thresholds follow the actual interval for each direction. The CSV comparison allows for sub-microsecond truncation at the interval boundaries.
 
+## GUI run report
+
+A headless test exercised the GUI device model with the independent localhost adapter. It armed CSV, connected at a requested 1,000 microseconds in both directions, received 1,250 and 1,500 microseconds from Forward_Open, disconnected, flushed, and saved the report. The report kept the requested and actual intervals separate, matched accepted packets to written rows, and recorded the final connection state. The adapter confirmed Forward_Close.
+
+Additional tests verified that a later connection cannot change the saved capture's connection context, that timeout details survive subsequent draft changes, and that an existing report is preserved. A rotation failure reported the disk error and one unconfirmed row separately from buffer overruns.
+
+To repeat the loopback check, run the fixture in one terminal and the GUI backend test in another. The test opens no window.
+
+```powershell
+python tools/loopback_adapter.py .local/report-adapter.json --mode different-api
+```
+
+```powershell
+cargo test --locked --release --bin assembly-scanner run_report_uses_the_final_loopback_connection -- --ignored
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

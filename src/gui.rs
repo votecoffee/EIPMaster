@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod run_report;
+
 const CYAN: Color32 = Color32::from_rgb(99, 226, 213);
 const AMBER: Color32 = Color32::from_rgb(247, 191, 101);
 const RED: Color32 = Color32::from_rgb(255, 119, 119);
@@ -131,6 +133,7 @@ struct Device {
     tx_spacing: Spacing,
     send_timing: SendTiming,
     capture: Option<Capture>,
+    capture_run: run_report::CaptureRun,
     slot: capture::Slot,
     capturing: bool,
     preferences: Preferences,
@@ -166,6 +169,7 @@ impl Device {
             tx_spacing: Spacing::default(),
             send_timing: SendTiming::default(),
             capture: None,
+            capture_run: run_report::CaptureRun::default(),
             slot: Default::default(),
             capturing: false,
             preferences: Preferences::default(),
@@ -431,6 +435,9 @@ impl Device {
             )
         }?;
         self.generation = generation;
+        if self.capturing {
+            self.capture_run.track(generation);
+        }
         self.active = Some(settings);
         self.status = Status::default();
         self.tx = 0;
@@ -464,6 +471,10 @@ impl Device {
         ) {
             Ok(capture) => {
                 self.capture = Some(capture);
+                self.capture_run = run_report::CaptureRun::default();
+                if self.connection.is_some() {
+                    self.capture_run.track(self.generation);
+                }
                 self.capturing = true;
                 self.error = None;
             }
@@ -488,6 +499,7 @@ impl Device {
                 let c = self.connection.take().unwrap();
                 self.status = c.status.lock().unwrap().clone();
                 c.join();
+                self.record_capture_connection();
                 self.writes_confirmed = false;
                 if let Some(reconnect) = &mut self.reconnect {
                     if !self.status.retryable {
@@ -1720,6 +1732,26 @@ impl Device {
             }
             ui.small(s.prefix.display().to_string());
         }
+        if self.capture.is_some()
+            && ui
+                .add_enabled(
+                    !self.capturing && !self.link_busy(),
+                    egui::Button::new("Save run report"),
+                )
+                .on_disabled_hover_text("Disconnect and stop capture before saving the report")
+                .clicked()
+        {
+            match self.save_run_report() {
+                Ok(path) => {
+                    self.error = None;
+                    self.notice = Some(format!("Saved run report to {}", path.display()));
+                }
+                Err(error) => {
+                    self.notice = None;
+                    self.error = Some(error);
+                }
+            }
+        }
     }
 }
 
@@ -1852,11 +1884,153 @@ mod tests {
         healthy.stop_capture();
         assert_eq!(healthy_sink.written.load(Relaxed), 1);
         assert_eq!(fs::read_to_string(&sentinel).unwrap(), "existing file");
+        let report_path = failing.save_run_report().unwrap();
+        let report: toml::Table =
+            toml::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
+        assert!(report.get("connection").is_none());
+        assert!(report["capture"]["disk_error"].as_str().is_some());
+        assert_eq!(report["capture"]["unconfirmed_rows"].as_integer(), Some(1));
+        assert_eq!(report["capture"]["buffer_overruns"].as_integer(), Some(0));
         for name in ["healthy", "failing"] {
             for file in fs::read_dir(directory.join(name)).unwrap() {
                 fs::remove_file(file.unwrap().path()).unwrap();
             }
             fs::remove_dir(directory.join(name)).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn run_report_keeps_the_connection_that_belonged_to_the_capture() {
+        let directory = temporary("run-report");
+        let mut device = Device::new(1, None);
+        device.preferences.directory = directory.display().to_string();
+        device.settings.capture_mode = CaptureMode::OnChange;
+        device.start_capture();
+        assert!(device.save_run_report().is_err());
+        let sink = device.capture.as_ref().unwrap().sink.clone();
+        device.capture_run.track(1);
+        sink.record(Instant::now(), 1, 1, 1, &[0; 4]);
+        sink.record(Instant::now(), 1, 2, 2, &[0; 4]);
+        device.capture_run.track(2);
+        sink.record(Instant::now(), 2, 1, 1, &[0; 4]);
+        device.stop_capture();
+
+        device.generation = 2;
+        device.active = Some(Settings {
+            device_ip: Ipv4Addr::new(127, 0, 0, 2),
+            output_rpi_us: 1000,
+            input_rpi_us: 1000,
+            ..Settings::default()
+        });
+        device.status = Status {
+            state: "Timed out",
+            actual: Some((1250, 1500)),
+            valid: 1,
+            timeouts: 1,
+            receive_timeout: Some(scanner::ReceiveTimeout {
+                waiting_for_first_input: false,
+                limit_us: 48_000,
+                valid_input_silence_us: 48_100,
+                last_udp_age_us: Some(48_100),
+                last_sequence: Some(1),
+            }),
+            ..Status::default()
+        };
+        device.record_capture_connection();
+
+        device.generation = 3;
+        device.preferences.schedule = Schedule::Tokio;
+        device.status.state = "Closed";
+        device.record_capture_connection();
+        device.reset_endpoint_status();
+
+        let path = device.save_run_report().unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!(
+                "{}-report.toml",
+                sink.prefix.file_name().unwrap().to_string_lossy()
+            )
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        let report: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(report["mode"].as_str(), Some("gui"));
+        let capture = &report["capture"];
+        assert_eq!(capture["mode"].as_str(), Some("on_change"));
+        assert_eq!(capture["started_utc"].as_str(), Some(sink.start_utc()));
+        assert_eq!(capture["first_armed_generation"].as_integer(), Some(1));
+        assert_eq!(capture["last_armed_generation"].as_integer(), Some(2));
+        assert_eq!(capture["seen"].as_integer(), Some(3));
+        assert_eq!(capture["written"].as_integer(), Some(2));
+        assert_eq!(capture["unchanged"].as_integer(), Some(1));
+        let connection = &report["connection"];
+        assert_eq!(connection["generation"].as_integer(), Some(2));
+        assert_eq!(connection["adapter_ip"].as_str(), Some("127.0.0.2"));
+        assert_eq!(connection["state"].as_str(), Some("Timed out"));
+        assert_eq!(connection["schedule"].as_str(), Some("deadline"));
+        assert_eq!(connection["requested_to_us"].as_integer(), Some(1000));
+        assert_eq!(connection["actual_to_us"].as_integer(), Some(1500));
+        assert_eq!(
+            connection["receive_timeout"]["limit_us"].as_integer(),
+            Some(48_000)
+        );
+        assert!(device.save_run_report().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        for file in fs::read_dir(&directory).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires tools/loopback_adapter.py --mode different-api on localhost"]
+    fn run_report_uses_the_final_loopback_connection() {
+        let directory = temporary("loopback-run-report");
+        let mut device = Device::new(1, None);
+        device.preferences.directory = directory.display().to_string();
+        device.start_capture();
+        device.connect(&[]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while device.connection.is_some() && device.status.valid < 50 && Instant::now() < deadline {
+            device.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        device.disconnect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while device.connection.is_some() && Instant::now() < deadline {
+            device.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(device.connection.is_none() && device.status.valid >= 50);
+        device.stop_capture();
+        let path = device.save_run_report().unwrap();
+        let report: toml::Table = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            report["capture"]["first_armed_generation"].as_integer(),
+            Some(1)
+        );
+        assert_eq!(
+            report["capture"]["last_armed_generation"].as_integer(),
+            Some(1)
+        );
+        let link = &report["connection"];
+        assert_eq!(link["state"].as_str(), Some("Closed"));
+        assert_eq!(link["requested_ot_us"].as_integer(), Some(1000));
+        assert_eq!(link["requested_to_us"].as_integer(), Some(1000));
+        assert_eq!(link["actual_ot_us"].as_integer(), Some(1250));
+        assert_eq!(link["actual_to_us"].as_integer(), Some(1500));
+        assert_eq!(
+            link["receive_spacing"]["intervals"].as_integer(),
+            Some(device.status.valid as i64 - 1)
+        );
+        assert_eq!(
+            report["capture"]["written"].as_integer(),
+            link["accepted"].as_integer()
+        );
+        assert_eq!(report["capture"]["unconfirmed_rows"].as_integer(), Some(0));
+        for file in fs::read_dir(&directory).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
         }
         fs::remove_dir(directory).unwrap();
     }

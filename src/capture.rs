@@ -52,6 +52,18 @@ pub struct Sink {
 pub type Slot = Arc<RwLock<Option<Arc<Sink>>>>;
 
 impl Sink {
+    pub fn start_utc(&self) -> &str {
+        &self.utc
+    }
+
+    pub fn mode(&self) -> CaptureMode {
+        if self.changes.is_some() {
+            CaptureMode::OnChange
+        } else {
+            CaptureMode::EveryPacket
+        }
+    }
+
     pub fn record(
         &self,
         stamp: Instant,
