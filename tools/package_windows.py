@@ -181,13 +181,15 @@ def package(args):
     flags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/Brepro",
              "-C", "link-arg=/INCREMENTAL:NO"]
     cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
-    for path, replacement in ((ROOT, "eipmaster"), (cargo_home, "cargo-home")):
+    target_dir = args.target_dir.resolve()
+    for path, replacement in ((ROOT, "eipmaster"), (cargo_home, "cargo-home"),
+                              (target_dir, "target-build")):
         for spelling in dict.fromkeys((str(path), path.as_posix())):
             flags.extend(("--remap-path-prefix", f"{spelling}={replacement}"))
     env = os.environ | {"CARGO_ENCODED_RUSTFLAGS": "\x1f".join(flags), "CARGO_INCREMENTAL": "0"}
     built = subprocess.run([
         *cargo, "build", "--locked", "--release", "--target", TARGET, "--bins",
-        "--target-dir", str(args.target_dir.resolve()), "--message-format=json-render-diagnostics",
+        "--target-dir", str(target_dir), "--message-format=json-render-diagnostics",
         *offline,
     ], cwd=ROOT, env=env, stdout=subprocess.PIPE)
     executables = {}
