@@ -282,6 +282,69 @@ def check_qualification(exe, root):
     print("Qualification stops after an unconfirmed close and rejects serial changes, interval mismatches, link labels, and writes")
 
 
+def check_input_preview(exe, root):
+    def decode(profile, payload):
+        return subprocess.run([exe, "decode-input", profile, payload], capture_output=True,
+                              encoding="utf-8", timeout=5, creationflags=NO_WINDOW)
+
+    mapped = PROFILE.with_name("mapped-loopback.toml")
+    result = decode(mapped, "0x01 02\n03 04")
+    assert result.returncode == 0, result.stderr
+    preview = tomllib.loads(result.stdout)
+    assert (preview["input_assembly"], preview["input_size"], preview["payload_hex"]) == (101, 4, "01 02 03 04")
+    assert [(f["name"], f["raw_hex"], f["value"], f["included_in_csv"]) for f in preview["fields"]] == [
+        ("counter", "01 02 03 04", "67305985", True),
+        ("low_bit", "01", "true", True),
+        ("swapped_word", "01 02", "513", False),
+    ]
+    assert preview["fields"][1]["selection"]["bit"] == 0
+    assert preview["fields"][2]["selection"]["swap"] == "bytes_in_words"
+
+    legacy = decode(PROFILE, "04 03 02 01")
+    assert legacy.returncode == 0, legacy.stderr
+    [primary] = tomllib.loads(legacy.stdout)["fields"]
+    assert primary["name"] == "value" and primary["value"] == "16909060" and primary["included_in_csv"]
+
+    synthetic = root / "decode-types.toml"
+    template = PROFILE.read_text(encoding="utf-8").replace("input_size = 4", "input_size = 20")
+    template = template.replace('device_ip = "127.0.0.1"', 'device_ip = "0.0.0.0"')
+    template = template.replace("input_run_idle = false", "input_run_idle = true")
+    template = template.replace("[selection]", "log_fields = []\n\n[selection]")
+    synthetic.write_text(template + """
+[[input_fields]]
+name = "signed_word_order"
+selection = { offset = 0, kind = "I32", big_endian = true, swap = "word_order" }
+[[input_fields]]
+name = "float"
+selection = { offset = 4, kind = "F32" }
+[[input_fields]]
+name = "full_width"
+selection = { offset = 8, kind = "U64" }
+[[input_fields]]
+name = "text"
+selection = { offset = 16, kind = "Utf8", string_length = 4 }
+""", encoding="utf-8")
+    payload = "FF FE FF FF 00 00 80 BF FF FF FF FF FF FF FF FF C3 A9 0A 00"
+    result = decode(synthetic, payload)
+    assert result.returncode == 0, result.stderr
+    fields = tomllib.loads(result.stdout)["fields"]
+    assert [f["value"] for f in fields] == ["-2", "-1", "18446744073709551615", "\u00e9\n"]
+    assert all(not f["included_in_csv"] for f in fields)
+
+    invalid_layout = root / "decode-invalid-layout.toml"
+    invalid_layout.write_text(synthetic.read_text(encoding="utf-8").replace("string_length = 4", "string_length = 5"),
+                              encoding="utf-8")
+    for profile, data, error in [
+        (mapped, "01 02 03", "Expected 4 input payload bytes, got 3"),
+        (mapped, "00 00 00 00 01 02 03 04", "Expected 4 input payload bytes, got 8"),
+        (mapped, "GG 02 03 04", "Invalid hex byte"),
+        (invalid_layout, payload, "text: Selected value extends past the assembly"),
+    ]:
+        result = decode(profile, data)
+        assert result.returncode == 1 and error in result.stderr and not result.stdout
+    print("Offline input preview verified mapped and legacy values, CSV selection, and payload validation")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=Path)
@@ -296,6 +359,7 @@ def main():
         check_qualification(exe, root)
         return
 
+    check_input_preview(exe, root)
     imported = subprocess.run([exe, "eds", PROFILE.with_suffix(".eds")],
                               capture_output=True, text=True, timeout=5)
     assert imported.returncode == 0, imported.stderr

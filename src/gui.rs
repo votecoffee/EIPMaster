@@ -124,6 +124,7 @@ struct Device {
     bench_confirmed: bool,
     writes_confirmed: bool,
     output_entries: Vec<String>,
+    preview_hex: String,
     connection: Option<Connection>,
     active: Option<Settings>,
     status: Status,
@@ -160,6 +161,7 @@ impl Device {
             bench_confirmed: false,
             writes_confirmed: false,
             output_entries: Vec::new(),
+            preview_hex: String::new(),
             connection: None,
             active: None,
             status: Status::default(),
@@ -294,6 +296,7 @@ impl Device {
                 }
                 self.selected = None;
                 self.output_entries.clear();
+                self.preview_hex.clear();
                 self.bench_confirmed = false;
                 self.writes_confirmed = false;
                 self.error = None;
@@ -1262,6 +1265,7 @@ impl Device {
                 });
             }
             if !online && !self.capturing {
+                ui.collapsing("Preview input payload", |ui| self.show_input_preview(ui));
                 ui.collapsing("Offline profile check", |ui| self.show_preflight(ui));
             }
         });
@@ -1494,6 +1498,48 @@ impl Device {
                         ui.end_row();
                     }
                 });
+        }
+    }
+    fn show_input_preview(&mut self, ui: &mut Ui) {
+        ui.small("Paste assembly bytes in hex, with spaces between bytes. Exclude sequence and Run/Idle headers.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.preview_hex)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .code_editor(),
+        );
+        if self.preview_hex.trim().is_empty() {
+            return;
+        }
+        let preview = model::parse_hex(&self.preview_hex)
+            .and_then(|bytes| self.settings.preview_input(&bytes));
+        match preview {
+            Ok(preview) => {
+                egui::ScrollArea::both()
+                    .id_salt("input-preview-scroll")
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("input-preview")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for heading in ["Field", "Offset", "Bytes", "Value", "CSV"] {
+                                    ui.strong(heading);
+                                }
+                                ui.end_row();
+                                for field in preview.fields {
+                                    ui.label(field.name);
+                                    ui.monospace(field.selection.offset.to_string());
+                                    ui.monospace(field.raw_hex);
+                                    ui.monospace(field.value);
+                                    ui.label(if field.included_in_csv { "Yes" } else { "No" });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+            Err(error) => {
+                ui.colored_label(AMBER, error);
+            }
         }
     }
     fn typed_outputs(&mut self, ui: &mut Ui) {

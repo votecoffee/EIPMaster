@@ -1,7 +1,7 @@
 use assembly_scanner::{
     capture::{Capture, FieldSummary, MAX_CAPTURE_SECONDS, Options, Slot},
     eds,
-    model::{ConnectionTimeout, Settings},
+    model::{ConnectionTimeout, Settings, parse_hex},
     preflight,
     scanner::{
         CloseOutcome, Connection, CyclicIo, Identity, IdentityKey, IdentityPin, ReceiveTimeout,
@@ -31,6 +31,7 @@ const USAGE: &str = "\
 Usage:
   eipmaster-cli eds <vendor.eds>
   eipmaster-cli validate <settings.toml> [<vendor.eds> <ConnectionN>]
+  eipmaster-cli decode-input <settings.toml> \"<assembly hex bytes>\"
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
   eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product[:serial]>
   eipmaster-cli qualify <settings.toml> <new-output-dir> <direct|switched|loopback> <vendor:type:product:serial> [<loopback-seconds>]
@@ -116,6 +117,12 @@ fn run(args: &[OsString]) -> Result<bool, String> {
                 toml::to_string_pretty(&report).map_err(|e| e.to_string())?
             );
             Ok(report.connection_valid)
+        }
+        [command, profile, payload] if command == "decode-input" => {
+            let (settings, _) = settings_file::load_profile(Path::new(profile))?;
+            let bytes = parse_hex(&payload.to_string_lossy())?;
+            print!("{}", report_text(&settings.preview_input(&bytes)?)?);
+            Ok(true)
         }
         [command, adapter, local] if command == "identity" => {
             let settings = Settings {

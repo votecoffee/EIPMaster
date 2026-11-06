@@ -99,6 +99,16 @@ For outputs, define **Named output mappings** and open **Stage typed output valu
 
 The EDS importer resolves supported connection profiles. Define the application-level value map from the adapter's documentation or load a saved TOML profile. The [mapped loopback profile](samples/mapped-loopback.toml) shows the mapping syntax and selection.
 
+### Preview an input payload
+
+Open **Assembly mappings → Preview input payload** while offline. Paste the assembly payload as space-separated hex bytes. Use exactly the configured input size and exclude sequence and Run/Idle headers. For a previous CLI capture, copy the `last_input_hex` value from `capture.toml`. The preview shows each named input's byte offset, source bytes, decoded value, and whether it is included in CSV. With no named inputs, it shows the primary `value` field.
+
+The `decode-input` command runs the same check and prints TOML. Values are represented as text to preserve full-width integers and the displayed float and string values. The command loads the profile and decodes the supplied bytes offline.
+
+```powershell
+.\target\release\eipmaster-cli.exe decode-input samples\mapped-loopback.toml "01 02 03 04"
+```
+
 ### Capture and join CSV
 
 Start capture before or during a connection. **Log all mapped inputs** includes every named input. Turn it off to choose columns using each field's **CSV** checkbox. **Every packet** writes one row per accepted forward-sequence input packet. **On change** writes the first packet of each connection and subsequent packets when any logged field changes. A written row contains all selected columns. Floats are compared by their IEEE bit patterns and text is compared up to the first NUL.
@@ -140,7 +150,7 @@ The GUI report's `[[attempts]]` entries cover the full lifetime of each connecti
 
 ### CLI
 
-The console executable uses the same EDS importer, scanner and CSV writer as the GUI. `eds` lists imported profiles, resolved settings, assembly definition widths, and unsupported features offline. `validate` checks a TOML profile offline and optionally compares it to one EDS connection profile. It reports connection validity and capture configuration separately. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.
+The console executable uses the same EDS importer, scanner and CSV writer as the GUI. `eds` lists imported profiles, resolved settings, assembly definition widths, and unsupported features offline. `validate` checks a TOML profile offline and optionally compares it to one EDS connection profile. It reports connection validity and capture configuration separately. `decode-input` previews mapped values from a supplied payload. `identity` binds to the local IPv4 address and reads the adapter's CIP Identity Object. `capture` checks the expected decimal vendor, device type and product code in the same session before Forward_Open. Use a verified input-only TOML profile with zero output and configuration bytes. The new capture directory's parent must already exist.
 
 ```powershell
 .\target\release\eipmaster-cli.exe eds samples\loopback.eds

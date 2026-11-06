@@ -204,6 +204,18 @@ impl Settings {
     }
 
     fn selected_fields(&self) -> Result<Vec<CaptureField>, String> {
+        let mut mapped = self.input_mapping()?;
+        mapped.retain(|field| self.logs_input(&field.name));
+        Ok(mapped)
+    }
+
+    fn logs_input(&self, name: &str) -> bool {
+        self.log_fields
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|selected| selected == name))
+    }
+
+    fn input_mapping(&self) -> Result<Vec<CaptureField>, String> {
         validate_fields(&self.capture_fields, self.input_size as usize, true)?;
         let mapped = if self.capture_fields.is_empty() {
             self.selection.validate(self.input_size as usize)?;
@@ -225,10 +237,44 @@ impl Settings {
                 return Err(format!("Duplicate CSV input field {name:?}"));
             }
         }
-        Ok(mapped
-            .into_iter()
-            .filter(|field| names.contains(&field.name))
-            .collect())
+        Ok(mapped)
+    }
+
+    /// Decode an assembly payload with the profile's mapping and CSV selection.
+    pub fn preview_input(&self, bytes: &[u8]) -> Result<InputPreview, String> {
+        let size = self.input_size as usize;
+        if !(1..=MAX_ASSEMBLY_BYTES).contains(&size) {
+            return Err(format!(
+                "Input payload size must be between 1 and {MAX_ASSEMBLY_BYTES} bytes"
+            ));
+        }
+        if bytes.len() != size {
+            return Err(format!(
+                "Expected {size} input payload bytes, got {}",
+                bytes.len()
+            ));
+        }
+        let mut fields = Vec::new();
+        for field in self.input_mapping()? {
+            let selection = field.selection;
+            let value = selection
+                .decode(bytes)
+                .ok_or_else(|| format!("Cannot decode input field {:?}", field.name))?;
+            let raw = &bytes[selection.offset..selection.offset + selection.width()?];
+            fields.push(InputFieldPreview {
+                included_in_csv: self.logs_input(&field.name),
+                name: field.name,
+                selection,
+                raw_hex: hex(raw),
+                value: value.to_string(),
+            });
+        }
+        Ok(InputPreview {
+            input_assembly: self.input_instance,
+            input_size: self.input_size,
+            payload_hex: hex(bytes),
+            fields,
+        })
     }
 
     pub fn output(&self) -> Result<Vec<u8>, String> {
@@ -394,6 +440,23 @@ impl Default for Selection {
 pub struct CaptureField {
     pub name: String,
     pub selection: Selection,
+}
+
+#[derive(Serialize)]
+pub struct InputPreview {
+    pub input_assembly: u16,
+    pub input_size: u16,
+    pub payload_hex: String,
+    pub fields: Vec<InputFieldPreview>,
+}
+
+#[derive(Serialize)]
+pub struct InputFieldPreview {
+    pub name: String,
+    pub selection: Selection,
+    pub raw_hex: String,
+    pub value: String,
+    pub included_in_csv: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

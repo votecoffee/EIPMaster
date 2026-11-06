@@ -402,6 +402,12 @@ The receive checks use host timestamps around the receive loop. The scanner and 
 
 A separate ten-second loopback capture requested and negotiated 1,000 µs in both directions. It confirmed Forward_Close and wrote 9,984 rows with zero sequence gaps, watchdog timeouts, or CSV overruns. Receive p50, p95, p99, and longest spacing were 1,029, 1,233, 1,481, and 2,978 µs. The scanner skipped 22 send slots and the fixture skipped 16. The CSV cutoff excluded three additional accepted packets while the connection stopped.
 
+## Offline input payload preview
+
+The headless CLI regression decoded a four-byte payload with a little-endian counter, an LSB-first bit, and a swapped 16-bit word. The preview showed all three values and flagged the two columns selected for CSV. A legacy profile displayed its primary `value` field.
+
+A second payload verified signed big-endian decoding with word reversal, a 32-bit float, the full unsigned 64-bit range, and NUL-terminated UTF-8 with a newline. The command decoded the sample with an unfinished connection profile and an empty CSV selection. It rejected malformed hex, short and oversized payloads, and a named field that extended beyond the assembly. All preview checks ran offline.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.
