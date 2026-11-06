@@ -212,6 +212,8 @@ def concurrent(exe, root):
     timeout = prior["receive_timeout"]
     assert not timeout["waiting_for_first_input"]
     assert timeout["limit_us"] == 256_000
+    assert prior["connection_timeout"]["receive_watchdog_us"] == timeout["limit_us"]
+    assert restored["connection_timeout"]["multiplier_code"] == 3
     assert 0 < timeout["last_sequence"] <= recovered_adapters[0]["to_last_sequence"] == 75
     assert timeout["valid_input_silence_us"] >= timeout["limit_us"]
     assert timeout["last_udp_age_us"] <= timeout["valid_input_silence_us"]

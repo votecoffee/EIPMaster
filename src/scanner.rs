@@ -751,7 +751,7 @@ fn run(
         connection_serial: le16(&ids, 4).max(1),
         originator_vendor: 0,
         originator_serial: le32(&ids, 6).max(1),
-        connection_timeout_mult: 3,
+        connection_timeout_mult: cfg.timeout_multiplier_code,
         o_to_t_rpi_us: cfg.output_rpi_us,
         o_to_t_params: params(cfg.output_size, cfg.output_run_idle, cfg.output_priority),
         t_to_o_rpi_us: cfg.input_rpi_us,
@@ -1034,7 +1034,11 @@ fn receive(
     let first_timeout = Duration::from_secs(2).max(Duration::from_micros(
         u64::from(reply.t_to_o_actual_rpi_us) * 2,
     ));
-    let watchdog = Duration::from_micros(u64::from(reply.t_to_o_actual_rpi_us) * 32);
+    let watchdog = Duration::from_micros(
+        cfg.connection_timeout(Some(reply.t_to_o_actual_rpi_us))
+            .receive_watchdog_us
+            .expect("validated timeout code and actual input interval"),
+    );
     let mut packet = [0; 65_536];
     let mut last_seq: Option<u32> = None;
     let mut last_udp = None;

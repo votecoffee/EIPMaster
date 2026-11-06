@@ -1,4 +1,8 @@
-use crate::{eds, model::Settings, settings_file::Preferences};
+use crate::{
+    eds,
+    model::{ConnectionTimeout, Settings},
+    settings_file::Preferences,
+};
 use serde::Serialize;
 use std::net::Ipv4Addr;
 
@@ -51,6 +55,7 @@ pub struct Report {
     pub asserts_run: bool,
     pub configuration_assembly: Option<u16>,
     pub configuration_bytes: u16,
+    pub connection_timeout: ConnectionTimeout,
     pub connection_errors: Vec<String>,
     pub capture_errors: Vec<String>,
     pub eds_profile: Option<String>,
@@ -161,6 +166,11 @@ pub fn inspect(
             config(settings.config_instance),
             config(imported.config_instance),
         );
+        compare(
+            "Timeout multiplier code",
+            settings.timeout_multiplier_code.to_string(),
+            imported.timeout_multiplier_code.to_string(),
+        );
     }
 
     Report {
@@ -173,6 +183,7 @@ pub fn inspect(
         asserts_run: settings.output_run_idle,
         configuration_assembly: settings.config_instance,
         configuration_bytes: settings.config_size,
+        connection_timeout: settings.connection_timeout(None),
         connection_errors,
         capture_errors,
         eds_profile: profile.map(|profile| profile.id.clone()),

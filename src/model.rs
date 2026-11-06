@@ -11,6 +11,19 @@ pub const CAPTURE_METADATA: [&str; 6] = [
 ];
 pub const MAX_ASSEMBLY_BYTES: usize = 509;
 pub const MAX_MAPPED_FIELDS: usize = 256;
+pub const MAX_TIMEOUT_MULTIPLIER_CODE: u8 = 7;
+
+fn default_timeout_multiplier_code() -> u8 {
+    3
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ConnectionTimeout {
+    pub multiplier_code: u8,
+    pub factor: Option<u16>,
+    pub requested_receive_watchdog_us: Option<u64>,
+    pub receive_watchdog_us: Option<u64>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +54,8 @@ pub struct Settings {
     pub input_priority: u8,
     pub output_rpi_us: u32,
     pub input_rpi_us: u32,
+    #[serde(default = "default_timeout_multiplier_code")]
+    pub timeout_multiplier_code: u8,
     pub selection: Selection,
     #[serde(
         default,
@@ -80,6 +95,7 @@ impl Default for Settings {
             capture_mode: CaptureMode::EveryPacket,
             output_rpi_us: 1000,
             input_rpi_us: 1000,
+            timeout_multiplier_code: default_timeout_multiplier_code(),
             selection: Selection::default(),
         }
     }
@@ -102,6 +118,22 @@ pub fn hex(data: &[u8]) -> String {
         .join(" ")
 }
 impl Settings {
+    pub fn connection_timeout(&self, actual_input_rpi_us: Option<u32>) -> ConnectionTimeout {
+        let code = self.timeout_multiplier_code;
+        let factor = (code <= MAX_TIMEOUT_MULTIPLIER_CODE).then(|| 4u16 << code);
+        let watchdog = |rpi| {
+            factor
+                .filter(|_| rpi != 0)
+                .map(|factor| u64::from(factor) * u64::from(rpi))
+        };
+        ConnectionTimeout {
+            multiplier_code: code,
+            factor,
+            requested_receive_watchdog_us: watchdog(self.input_rpi_us),
+            receive_watchdog_us: actual_input_rpi_us.and_then(watchdog),
+        }
+    }
+
     pub fn input_only_without_writes(&self) -> bool {
         self.input_only && self.output_size == 0 && self.config_size == 0 && !self.output_run_idle
     }
@@ -130,6 +162,9 @@ impl Settings {
         }
         if self.input_priority > 3 || self.output_priority > 3 {
             return Err("Connection priorities must be 0–3".into());
+        }
+        if self.timeout_multiplier_code > MAX_TIMEOUT_MULTIPLIER_CODE {
+            return Err("CIP timeout multiplier code must be 0–7".into());
         }
         if !(1000..=10_000_000).contains(&self.input_rpi_us)
             || !(1000..=10_000_000).contains(&self.output_rpi_us)
@@ -529,6 +564,31 @@ fn parse_bool(value: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_codes_use_negotiated_input_interval_and_support_legacy_profiles() {
+        let mut settings: Settings =
+            toml::from_str(include_str!("../samples/loopback.toml")).unwrap();
+        assert_eq!(settings.timeout_multiplier_code, 3);
+        for (code, factor) in [4u16, 8, 16, 32, 64, 128, 256, 512].into_iter().enumerate() {
+            settings.timeout_multiplier_code = code as u8;
+            assert!(settings.validate().is_ok());
+            let timeout = settings.connection_timeout(Some(1500));
+            assert_eq!(timeout.factor, Some(factor));
+            assert_eq!(
+                timeout.requested_receive_watchdog_us,
+                Some(u64::from(factor) * 1000)
+            );
+            assert_eq!(timeout.receive_watchdog_us, Some(u64::from(factor) * 1500));
+        }
+        settings.timeout_multiplier_code = 8;
+        assert!(settings.validate().is_err());
+        assert_eq!(
+            settings.connection_timeout(Some(1500)).receive_watchdog_us,
+            None
+        );
+    }
+
     #[test]
     fn decode_types_endian_bit_and_bounds() {
         let mut s = Selection {

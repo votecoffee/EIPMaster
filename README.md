@@ -84,6 +84,8 @@ Open **Offline profile check** to review the effective assemblies, requested int
 
 The initial protocol scope is standard Forward_Open, fixed-size cyclic Class 1 unicast and direct assembly paths. Routed paths, electronic keys, multicast, listen-only, and Large Forward_Open are outside that scope. Keep device-specific presets, vendor files and raw captures in the Git-ignored `.local/` folder. The tracked [sample EDS](samples/loopback.eds) and [sample TOML](samples/loopback.toml) target the localhost fixture.
 
+Set **CIP timeout code** in the GUI or `timeout_multiplier_code` in the TOML profile. Codes 0 through 7 represent factors of 4 through 512 in powers of two. Profiles that omit the setting use code 3 (32 times the interval). The app sends the code in Forward_Open and uses the returned input interval times that factor for its local receive watchdog. Before the first valid input, the scanner waits for the larger of two seconds and two returned input intervals. Preflight shows the watchdog calculated from the requested interval. Capture reports also show the local watchdog calculated from the interval the adapter returned.
+
 ### Map assembly values
 
 Each field uses a zero-based byte offset and a type. Use offset 6 for the fourth 16-bit word. A single-bit field uses an LSB-first index from 0 to 7 within its byte. **Bool** reads true from any nonzero byte and writes either 0 or 1. A mapped bit write preserves the other bits in the byte. Integer types support signed and unsigned 8-, 16-, 32- and 64-bit values, and floats use IEEE 754 `F32` or `F64`.

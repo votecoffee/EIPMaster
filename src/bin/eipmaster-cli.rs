@@ -1,7 +1,7 @@
 use assembly_scanner::{
     capture::{Capture, FieldSummary, Slot},
     eds,
-    model::Settings,
+    model::{ConnectionTimeout, Settings},
     preflight,
     scanner::{
         CloseOutcome, Connection, Identity, IdentityKey, IdentityPin, ReceiveTimeout, Reconnect,
@@ -250,6 +250,7 @@ struct Report {
     requested_to_us: u32,
     actual_ot_us: Option<u32>,
     actual_to_us: Option<u32>,
+    connection_timeout: ConnectionTimeout,
     accepted: u64,
     sequence_gaps: u64,
     duplicates: u64,
@@ -309,6 +310,7 @@ struct AttemptReport {
     state: &'static str,
     actual_ot_us: Option<u32>,
     actual_to_us: Option<u32>,
+    connection_timeout: ConnectionTimeout,
     accepted: u64,
     sequence_gaps: u64,
     timeouts: u64,
@@ -351,7 +353,7 @@ impl Attempt {
         }
     }
 
-    fn report(&self, generation: usize) -> AttemptReport {
+    fn report(&self, generation: usize, settings: &Settings) -> AttemptReport {
         let status = &self.status;
         let (actual_ot_us, actual_to_us) = status.actual.unzip();
         AttemptReport {
@@ -359,6 +361,7 @@ impl Attempt {
             state: status.state,
             actual_ot_us,
             actual_to_us,
+            connection_timeout: settings.connection_timeout(actual_to_us),
             accepted: status.valid,
             sequence_gaps: status.gaps,
             timeouts: status.timeouts,
@@ -537,6 +540,7 @@ fn capture(
         requested_to_us: settings.input_rpi_us,
         actual_ot_us,
         actual_to_us,
+        connection_timeout: settings.connection_timeout(actual_to_us),
         accepted: sum(|run| run.status.valid),
         sequence_gaps: sum(|run| run.status.gaps),
         duplicates: sum(|run| run.status.duplicates),
@@ -571,7 +575,7 @@ fn capture(
             attempts
                 .iter()
                 .enumerate()
-                .map(|(index, run)| run.report(index + 1))
+                .map(|(index, run)| run.report(index + 1, settings))
                 .collect()
         } else {
             Vec::new()

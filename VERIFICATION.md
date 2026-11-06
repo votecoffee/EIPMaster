@@ -310,6 +310,19 @@ python tools/loopback_adapter.py .local/report-recovery-adapter.json --mode reco
 cargo test --locked --release --bin assembly-scanner run_report_keeps_loopback_reconnect_attempts -- --ignored --nocapture
 ```
 
+## Configurable CIP watchdog
+
+An independent loopback fixture read the timeout code from the Forward_Open request. It returned 1,250 microseconds O-to-T and 1,500 microseconds T-to-O for an 8 ms request in both directions, then paused input after sequence 75. Code 3 (32 times the interval) timed out after 48.824 ms of silence with a 48 ms limit and saved 75 rows. Code 4 (64 times the interval) completed with a 96 ms limit, observed a 61.478 ms input gap, and saved 632 rows. Both captures accounted for all accepted packets and confirmed Forward_Close. [Timeout code encoding](https://www.hilscher.com/fileadmin/cms_upload/de/Resources/pdf/EtherNetIP_Scanner_Protocol_API_14_EN.pdf#page=160)
+
+Two separate 15-second Windows loopback captures requested and negotiated 1,000 microseconds in both directions. Both closed cleanly with zero sequence gaps, watchdog timeouts, and CSV overruns.
+
+| Code | Receive watchdog (ms) | Rows written | Observed receive packets/s | Receive p99 / longest (microseconds) | Scanner / fixture skipped send slots |
+|---|---:|---:|---:|---:|---:|
+| 3 | 32 | 14,939 | 995.5 | 1,558 / 5,236 | 73 / 67 |
+| 4 | 64 | 14,953 | 996.3 | 1,574 / 3,793 | 43 / 56 |
+
+These are loopback socket measurements. The test suite checks all eight codes, legacy profiles, a reserved code, and the negotiated watchdog in the GUI and headless reports.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

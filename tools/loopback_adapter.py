@@ -115,6 +115,9 @@ def udp_loop(udp, endpoint, connection, api, mode, value_base, stop, report):
                 udp.sendto(packet, endpoint)
                 sent.append(time.perf_counter_ns())
                 last_sent_sequence = seq
+                if mode == "pause-different-api" and seq == 75:
+                    deadline += 60_000_000
+                    report["pause_after_sequence"] = seq
                 if mode == "faults" and seq == 80:
                     udp.sendto(packet, endpoint)
                     udp.sendto(io_packet(connection, 60, value), endpoint)
@@ -180,11 +183,15 @@ def serve(tcp, udp, mode, report, serial_delta=0):
                     assert to_params & 0xE3FF == (0x400A if owner else 0x4006)
                     family, port, address = struct.unpack(">HH4s8x", items[0x8001])
                     assert family == 2 and socket.inet_ntoa(address) == scanner_ip and port != 0
-                    report.update(ot_requested_us=ot_rpi, to_requested_us=to_rpi)
+                    assert body[18] <= 7 and body[19:22] == bytes(3)
+                    report.update(ot_requested_us=ot_rpi, to_requested_us=to_rpi,
+                                  timeout_multiplier_code=body[18])
                     if mode == "reject":
                         response = rr_reply(bytes.fromhex("D4 00 01 01 09 01"))
                     else:
-                        ot_api, to_api = (1250, 1500) if mode == "different-api" else (ot_rpi, to_rpi)
+                        ot_api, to_api = (1250, 1500) if mode in (
+                            "different-api", "pause-different-api",
+                        ) else (ot_rpi, to_rpi)
                         reply = struct.pack("<IIHHIIIBB", OT_ID, to, serial, vendor, origin,
                                             ot_api, to_api, 0, 0)
                         response = rr_reply(b"\xD4\0\0\0" + reply,
@@ -227,7 +234,7 @@ def main():
         "reconnect", "recover", "replacement", "qualify", "qualify-different-api",
         "qualify-replacement", "close-reject", "close-mismatch", "close-short", "close-eof",
         "stall-close-reject", "qualify-close-reject",
-        "slow-input",
+        "slow-input", "pause-different-api",
     ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()

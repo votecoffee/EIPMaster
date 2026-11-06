@@ -1125,7 +1125,7 @@ impl Device {
             let s = &mut self.settings;
             let write_settings = |s: &Settings| (
                 s.input_only, s.output_instance, s.output_size, s.output_run_idle,
-                s.config_instance, s.config_size,
+                s.config_instance, s.config_size, s.timeout_multiplier_code,
             );
             let before = write_settings(s);
             ui.separator();
@@ -1147,6 +1147,20 @@ impl Device {
                 ui.label("CIP priority (0–3)");
                 ui.add(egui::DragValue::new(&mut s.input_priority).range(0..=3));
                 ui.add(egui::DragValue::new(&mut s.output_priority).range(0..=3)); ui.end_row();
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("CIP timeout code (0–7)");
+                ui.add(
+                    egui::DragValue::new(&mut s.timeout_multiplier_code)
+                        .range(0..=model::MAX_TIMEOUT_MULTIPLIER_CODE)
+                        .clamp_existing_to_range(false),
+                )
+                .on_hover_text("Sent in Forward_Open. The local receive watchdog uses the returned T->O interval.");
+                if let Some(factor) = s.connection_timeout(None).factor {
+                    ui.small(format!("×{factor}"));
+                } else {
+                    ui.colored_label(AMBER, "Enter a timeout code from 0 to 7");
+                }
             });
             ui.horizontal(|ui| {
                 let mut cfg = s.config_instance.is_some();
@@ -1367,6 +1381,7 @@ impl Device {
             settings.log_fields = self.settings.log_fields.take();
             settings.capture_mode = self.settings.capture_mode;
             settings.local_udp_port = self.settings.local_udp_port;
+            settings.timeout_multiplier_code = self.settings.timeout_multiplier_code;
             self.settings = settings;
         }
     }
@@ -1400,6 +1415,12 @@ impl Device {
             ui.label(format!(
                 "{label} · Assembly {} · {} bytes · {} µs requested",
                 direction.assembly, direction.payload_bytes, direction.requested_rpi_us
+            ));
+        }
+        if let Some(us) = report.connection_timeout.requested_receive_watchdog_us {
+            ui.small(format!(
+                "Receive watchdog at requested input RPI · {:.3} ms",
+                us as f64 / 1000.0
             ));
         }
         if report.requests_output_ownership {
@@ -1553,6 +1574,14 @@ impl Device {
                     }
                     ui.end_row();
                 });
+            let timeout = active.connection_timeout(self.status.actual.map(|(_, input)| input));
+            if let (Some(factor), Some(us)) = (timeout.factor, timeout.receive_watchdog_us) {
+                ui.small(format!(
+                    "Receive watchdog {:.3} ms · CIP code {} · ×{factor}",
+                    us as f64 / 1000.0,
+                    timeout.multiplier_code
+                ));
+            }
         }
         let input_age = self.connection.as_ref().map_or_else(
             || self.status.last_input.map(|stamp| stamp.elapsed()),
@@ -1785,7 +1814,9 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let mut legacy = Device::new(1, None);
         legacy.profiles = eds::parse(include_str!("../samples/loopback.eds")).unwrap();
+        legacy.settings.timeout_multiplier_code = 4;
         legacy.select_profile(Some(0));
+        assert_eq!(legacy.settings.timeout_multiplier_code, 4);
         legacy.settings.input_rpi_us = 8_000;
         legacy.device = "in-progress address".into();
         legacy.local = "127.0.0.2".into();
@@ -2045,6 +2076,7 @@ mod tests {
         let directory = temporary("loopback-run-report");
         let mut device = Device::new(1, None);
         device.preferences.directory = directory.display().to_string();
+        device.settings.timeout_multiplier_code = 4;
         device.start_capture();
         device.connect(&[]);
         poll_until(&mut device, |device| device.status.valid >= 50);
@@ -2072,6 +2104,13 @@ mod tests {
         assert_eq!(link["requested_to_us"].as_integer(), Some(1000));
         assert_eq!(link["actual_ot_us"].as_integer(), Some(1250));
         assert_eq!(link["actual_to_us"].as_integer(), Some(1500));
+        let timeout = &link["connection_timeout"];
+        assert_eq!(timeout["multiplier_code"].as_integer(), Some(4));
+        assert_eq!(
+            timeout["requested_receive_watchdog_us"].as_integer(),
+            Some(64_000)
+        );
+        assert_eq!(timeout["receive_watchdog_us"].as_integer(), Some(96_000));
         assert_eq!(
             link["receive_spacing"]["intervals"].as_integer(),
             Some(device.status.valid as i64 - 1)

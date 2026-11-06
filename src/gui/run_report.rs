@@ -1,7 +1,7 @@
 use super::Device;
 use crate::{
     capture::FieldSummary,
-    model::CaptureMode,
+    model::{CaptureMode, ConnectionTimeout},
     scanner::{CloseOutcome, Identity, ReceiveTimeout, Schedule, SendTiming, Spacing},
     settings_file,
 };
@@ -46,6 +46,7 @@ struct ConnectionReport {
     requested_to_us: u32,
     actual_ot_us: Option<u32>,
     actual_to_us: Option<u32>,
+    connection_timeout: ConnectionTimeout,
     accepted: u64,
     sequence_gaps: u64,
     duplicates: u64,
@@ -123,6 +124,7 @@ impl Device {
             requested_to_us: active.input_rpi_us,
             actual_ot_us,
             actual_to_us,
+            connection_timeout: active.connection_timeout(actual_to_us),
             accepted: status.valid,
             sequence_gaps: status.gaps,
             duplicates: status.duplicates,

@@ -78,6 +78,35 @@ def check_field_summaries(report, names, samples):
             assert summary["maximum"] == str(max(numbers))
 
 
+def check_timeout_multiplier(exe, root, legacy):
+    for code, factor in [(3, 32), (4, 64)]:
+        name = f"timeout-code-{code}"
+        profile = root / f"{name}.toml"
+        profile.write_text(f"timeout_multiplier_code = {code}\n"
+                           + legacy.read_text(encoding="utf-8"), encoding="utf-8")
+        result, fixture = with_adapter(
+            root, name, [exe, "capture", profile, root / name, "1", "0:12:1"],
+            "pause-different-api",
+        )
+        report = tomllib.loads(result.stdout)
+        assert fixture["timeout_multiplier_code"] == code and fixture["pause_after_sequence"] == 75
+        assert report["actual_ot_us"] == 1250 and report["actual_to_us"] == 1500
+        assert report["connection_timeout"] == {
+            "multiplier_code": code, "factor": factor,
+            "requested_receive_watchdog_us": report["requested_to_us"] * factor,
+            "receive_watchdog_us": 1500 * factor,
+        }
+        assert fixture["forward_close"] and report["forward_close"] == {"outcome": "confirmed"}
+        assert report["accepted"] == report["written"] > 0 and report["buffer_overruns"] == 0
+        if code == 3:
+            assert result.returncode == 1 and report["state"] == "Timed out"
+            assert report["receive_timeout"]["limit_us"] == 48_000
+        else:
+            assert result.returncode == 0 and report["state"] == "Closed"
+            assert report["receive_spacing"]["max_us"] >= 55_000 and report["sequence_gaps"] == 0
+    print("Timeout code 3 expired at 48 ms and code 4 completed with a 96 ms watchdog")
+
+
 def check_close_failures(capture_command, root):
     for mode in ("close-reject", "close-mismatch", "close-short", "close-eof", "stall-close-reject"):
         out = root / mode
@@ -264,6 +293,10 @@ def main():
     fields = {item["field"]: item for item in preflight["origins"]}
     assert fields["T->O size"]["state"] == "assembly_definition"
     assert fields["T->O size"]["eds_size_is_layout"]
+    assert fields["Timeout multiplier code"]["state"] == "manual"
+    assert preflight["connection_timeout"] == {
+        "multiplier_code": 3, "factor": 32, "requested_receive_watchdog_us": 32_000,
+    }
 
     identity, adapter = with_adapter(root, "identity", [exe, "identity", "127.0.0.1", "127.0.0.1"])
     assert identity.returncode == 0, identity.stderr
@@ -275,6 +308,15 @@ def main():
 
     legacy = root / "legacy.toml"
     legacy.write_text(test_profile(PROFILE), encoding="utf-8")
+    invalid_timeout = root / "invalid-timeout.toml"
+    invalid_timeout.write_text("timeout_multiplier_code = 8\n" + legacy.read_text(encoding="utf-8"),
+                               encoding="utf-8")
+    invalid = subprocess.run([exe, "validate", invalid_timeout], capture_output=True, text=True,
+                             timeout=5, creationflags=NO_WINDOW)
+    invalid_report = tomllib.loads(invalid.stdout)
+    assert invalid.returncode == 1 and not invalid_report["connection_valid"]
+    assert invalid_report["connection_timeout"] == {"multiplier_code": 8}
+    assert any("CIP timeout multiplier code" in error for error in invalid_report["connection_errors"])
     size_override = root / "size-override.toml"
     size_override.write_text(test_profile(PROFILE).replace("input_size = 4", "input_size = 8"), encoding="utf-8")
     checked = subprocess.run([exe, "validate", size_override, PROFILE.with_suffix(".eds"), "Connection1"],
@@ -328,6 +370,7 @@ def main():
     assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
     assert int.from_bytes(bytes.fromhex(report["last_input_hex"]), "little") == int(samples[-1][6])
     assert report["duration_reached"] and report["buffer_overruns"] == 0
+    assert adapter["timeout_multiplier_code"] == report["connection_timeout"]["multiplier_code"] == 3
     assert report["forward_close"] == {"outcome": "confirmed"}
     assert report["actual_ot_us"] == report["actual_to_us"] == args.rpi_us
     check_spacing(report, samples)
@@ -336,6 +379,7 @@ def main():
     assert timing["max_dispatch_lateness_us"] >= (args.rpi_us if report["skipped_deadlines"] else 0)
     assert timing["max_send_call_us"] >= (args.rpi_us if timing["send_calls_at_or_over_rpi"] else 0)
     check_close_failures(capture, root)
+    check_timeout_multiplier(exe, root, legacy)
 
     slow, adapter = with_adapter(
         root, "slow-input", [*capture, root / "slow-input", "2", "0:12:1"], "slow-input"
