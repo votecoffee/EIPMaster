@@ -336,6 +336,22 @@ Start the indicated loopback mode in one terminal. Run the corresponding test fi
 | `qualify-replacement` | `manual_pinned_connection_blocks_a_replacement_before_writes` |
 | `identity-then-owner` | `matching_pin_allows_separately_authorized_owner_connection` |
 
+## Timed GUI capture
+
+A headless GUI backend test armed a one-second capture and waited 1.05 seconds before connecting to the 8 ms loopback fixture. The timer started at the first input. The test then delayed GUI polling until 200 ms after the cutoff. The capture saved 125 rows across rotated parts, and the connection received 151 packets before the test disconnected and confirmed Forward_Close. The run report recorded the one-second request and completed timer.
+
+A recorder test accepted an input timestamp one microsecond before the cutoff and excluded timestamps at and after it, across connection generations. Other tests covered early manual stop and saving and restoring the duration preference. The CLI regression completed a three-second capture with a one-second GUI duration in the same profile.
+
+To repeat the GUI backend check, start the normal loopback fixture and run the test in a second terminal. The test opens no window.
+
+```powershell
+python tools/loopback_adapter.py .local/gui-timed-adapter.json --mode normal
+```
+
+```powershell
+cargo test --locked --release --bin assembly-scanner timed_gui_capture_finishes_after_first_input_even_when_polling_is_delayed -- --ignored --nocapture
+```
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

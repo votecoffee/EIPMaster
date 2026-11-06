@@ -438,13 +438,15 @@ def main():
 
     mapped = root / "mapped.toml"
     mapped.write_text(test_profile(PROFILE.with_name("mapped-loopback.toml"))
-                      + '\n[app]\ncapacity = 512\nrotate_seconds = 1\nschedule = "tokio"\n',
+                      + '\n[app]\ncapacity = 512\nrotate_seconds = 1\ngui_capture_seconds = 1\nschedule = "tokio"\n',
                       encoding="utf-8")
     filtered, adapter = with_adapter(
         root, "on-change", [exe, "capture", mapped, root / "on-change", "3", "0:12:1"]
     )
     assert filtered.returncode == 0, (filtered.stdout, filtered.stderr)
     filtered_report = tomllib.loads(filtered.stdout)
+    assert filtered_report["duration_seconds"] == 3 and filtered_report["duration_reached"]
+    assert filtered_report["receive_spacing"]["span_us"] > 2_000_000
     parts = parts_for(Path(filtered_report["csv_prefix"]))
     assert filtered_report["schedule"] == "tokio" and len(parts) >= 2
     timing = filtered_report["send_timing"]

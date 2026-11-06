@@ -1,5 +1,5 @@
 use assembly_scanner::{
-    capture::{Capture, FieldSummary, Slot},
+    capture::{Capture, FieldSummary, MAX_CAPTURE_SECONDS, Slot},
     eds,
     model::{ConnectionTimeout, Settings},
     preflight,
@@ -146,7 +146,7 @@ fn run(args: &[OsString]) -> Result<bool, String> {
                 .to_string_lossy()
                 .parse::<u64>()
                 .ok()
-                .filter(|n| (1..=3600).contains(n))
+                .filter(|n| (1..=MAX_CAPTURE_SECONDS).contains(n))
                 .ok_or("Seconds must be an integer from 1 to 3600")?;
             let expected = parse_expected_identity(&expected.to_string_lossy())?;
             let (settings, preferences) = load_capture_profile(Path::new(profile))?;

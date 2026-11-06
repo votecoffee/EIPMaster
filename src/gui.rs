@@ -489,12 +489,13 @@ impl Device {
             .as_ref()
             .filter(|_| self.link_busy())
             .unwrap_or(&self.settings);
-        match Capture::start(
-            &self.slot,
-            self.preferences
-                .capture_options(PathBuf::from(&self.preferences.directory)),
-            settings,
-        ) {
+        let options = capture::Options {
+            duration_seconds: self.preferences.gui_capture_seconds,
+            ..self
+                .preferences
+                .capture_options(PathBuf::from(&self.preferences.directory))
+        };
+        match Capture::start(&self.slot, options, settings) {
             Ok(capture) => {
                 self.capture = Some(capture);
                 self.capture_run = run_report::CaptureRun::default();
@@ -537,6 +538,20 @@ impl Device {
                 }
             }
         }
+        if self.capturing
+            && let Some(capture) = &self.capture
+        {
+            if capture.finished() {
+                self.stop_capture();
+            } else if capture
+                .sink
+                .deadline()
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.capture_run.duration_reached = true;
+                self.stop_capture();
+            }
+        }
         if let Some((attempt, _)) = self.reconnect_pending()
             && let Some(pin) = self.reconnect.as_mut().unwrap().take_ready(Instant::now())
         {
@@ -548,9 +563,6 @@ impl Device {
                     self.error = Some(error);
                 }
             }
-        }
-        if self.capturing && self.capture.as_ref().is_some_and(Capture::finished) {
-            self.stop_capture();
         }
         if let Some(task) = &self.identity_task {
             match task.try_recv() {
@@ -1753,6 +1765,13 @@ impl Device {
                 ui.text_edit_singleline(&mut self.preferences.directory);
                 ui.end_row();
                 number(ui, "Buffer samples", &mut self.preferences.capacity);
+                ui.label("Stop after seconds (0 = manual)");
+                ui.add(
+                    egui::DragValue::new(&mut self.preferences.gui_capture_seconds)
+                        .range(0..=capture::MAX_CAPTURE_SECONDS)
+                        .clamp_existing_to_range(false),
+                );
+                ui.end_row();
                 number(
                     ui,
                     "Rotate after bytes (0 = off)",
@@ -1774,6 +1793,20 @@ impl Device {
         }
         if let Some(capture) = &self.capture {
             let s = &capture.sink;
+            if self.capturing && s.duration_seconds().is_some() {
+                if let Some(deadline) = s.deadline() {
+                    ui.small(format!(
+                        "{:.2} s until capture stops",
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_secs_f64()
+                    ));
+                } else {
+                    ui.small("Timer starts with the first input packet");
+                }
+            } else if self.capture_run.duration_reached {
+                ui.small("Capture time limit reached");
+            }
             let seen = s.seen.load(Relaxed);
             let unchanged = s.unchanged.load(Relaxed);
             let written = s.written.load(Relaxed);
@@ -1846,6 +1879,7 @@ mod tests {
         legacy.eds_path = "previous adapter.eds".into();
         legacy.toml_path = "saved profile.toml".into();
         legacy.preferences.rotate_seconds = 15;
+        legacy.preferences.gui_capture_seconds = 10;
         legacy.preferences.schedule = Schedule::Tokio;
         let saved = legacy.snapshot();
         fs::write(&path, toml::to_string_pretty(&saved.setup).unwrap()).unwrap();
@@ -1975,6 +2009,7 @@ mod tests {
         let mut device = Device::new(1, None);
         device.preferences.directory = directory.display().to_string();
         device.settings.capture_mode = CaptureMode::OnChange;
+        device.preferences.gui_capture_seconds = 60;
         device.start_capture();
         assert!(device.save_run_report().is_err());
         let sink = device.capture.as_ref().unwrap().sink.clone();
@@ -2035,6 +2070,8 @@ mod tests {
         assert_eq!(report["mode"].as_str(), Some("gui"));
         let capture = &report["capture"];
         assert_eq!(capture["mode"].as_str(), Some("on_change"));
+        assert_eq!(capture["duration_seconds"].as_integer(), Some(60));
+        assert_eq!(capture["duration_reached"].as_bool(), Some(false));
         assert_eq!(capture["started_utc"].as_str(), Some(sink.start_utc()));
         assert_eq!(capture["csv_parts"].as_integer(), Some(1));
         assert_eq!(capture["first_armed_generation"].as_integer(), Some(1));
@@ -2091,6 +2128,53 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    #[ignore = "requires tools/loopback_adapter.py --mode normal on localhost"]
+    fn timed_gui_capture_finishes_after_first_input_even_when_polling_is_delayed() {
+        let directory = temporary("gui-timed-capture");
+        let mut device = Device::new(1, None);
+        device.preferences.directory = directory.display().to_string();
+        device.preferences.gui_capture_seconds = 1;
+        device.preferences.rotate_bytes = 2048;
+        device.settings.input_rpi_us = 8000;
+        device.settings.output_rpi_us = 8000;
+        device.start_capture();
+        let sink = device.capture.as_ref().unwrap().sink.clone();
+        std::thread::sleep(Duration::from_millis(1050));
+        device.poll();
+        assert!(device.capturing && sink.deadline().is_none());
+
+        device.connect(&[]);
+        poll_until(&mut device, |_| sink.deadline().is_some());
+        let remaining = sink
+            .deadline()
+            .unwrap()
+            .saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining + Duration::from_millis(200));
+        device.poll();
+        assert!(!device.capturing && device.capture_run.duration_reached);
+        assert!(device.link_busy());
+        let written = sink.written.load(Relaxed);
+        assert!(written > 100 && sink.part_count() > 1);
+        assert_eq!(sink.seen.load(Relaxed), written);
+        poll_until(&mut device, |device| device.status.valid > written);
+        device.disconnect();
+        poll_until(&mut device, |device| !device.link_busy());
+
+        let path = device.save_run_report().unwrap();
+        let report: toml::Table = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let capture = &report["capture"];
+        assert_eq!(capture["duration_seconds"].as_integer(), Some(1));
+        assert_eq!(capture["duration_reached"].as_bool(), Some(true));
+        assert_eq!(capture["written"].as_integer(), Some(written as i64));
+        let link = &report["connection"];
+        assert_eq!(link["forward_close"]["outcome"].as_str(), Some("confirmed"));
+        let accepted = link["accepted"].as_integer().unwrap();
+        assert!(accepted > written as i64);
+        eprintln!("Timed GUI capture saved {written} rows of {accepted} connection packets");
+        remove_capture_directory(directory);
     }
 
     #[test]

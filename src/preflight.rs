@@ -1,4 +1,5 @@
 use crate::{
+    capture::MAX_CAPTURE_SECONDS,
     eds,
     model::{ConnectionTimeout, Settings},
     settings_file::Preferences,
@@ -73,6 +74,11 @@ pub fn inspect(
     let mut capture_errors: Vec<_> = settings.csv_fields().err().into_iter().collect();
     if !(1..=1_000_000).contains(&preferences.capacity) {
         capture_errors.push("Capture capacity must be between 1 and 1,000,000 samples".into());
+    }
+    if preferences.gui_capture_seconds > MAX_CAPTURE_SECONDS {
+        capture_errors.push(format!(
+            "GUI capture duration must be 0–{MAX_CAPTURE_SECONDS} seconds"
+        ));
     }
     if preferences.directory.trim().is_empty() {
         capture_errors.push("Enter a CSV output directory".into());

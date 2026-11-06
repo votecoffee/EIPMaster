@@ -14,6 +14,7 @@ pub(super) struct CaptureRun {
     first_generation: Option<u64>,
     last_generation: Option<u64>,
     attempts: Vec<ConnectionReport>,
+    pub(super) duration_reached: bool,
 }
 
 impl CaptureRun {
@@ -79,6 +80,8 @@ struct CaptureReport<'a> {
     csv_prefix: String,
     csv_parts: u64,
     mode: CaptureMode,
+    duration_seconds: Option<u64>,
+    duration_reached: Option<bool>,
     first_armed_generation: Option<u64>,
     last_armed_generation: Option<u64>,
     seen: u64,
@@ -153,6 +156,7 @@ impl Device {
         let unchanged = sink.unchanged.load(Relaxed);
         let written = sink.written.load(Relaxed);
         let buffer_overruns = sink.overrun.load(Relaxed);
+        let duration_seconds = sink.duration_seconds();
         let report = RunReport {
             mode: "gui",
             version: env!("CARGO_PKG_VERSION"),
@@ -163,6 +167,8 @@ impl Device {
                 csv_prefix: sink.prefix.display().to_string(),
                 csv_parts: sink.part_count(),
                 mode: sink.mode(),
+                duration_seconds,
+                duration_reached: duration_seconds.map(|_| self.capture_run.duration_reached),
                 first_armed_generation: self.capture_run.first_generation,
                 last_armed_generation: self.capture_run.last_generation,
                 seen,

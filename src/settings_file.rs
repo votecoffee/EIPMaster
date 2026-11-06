@@ -13,6 +13,7 @@ pub struct Preferences {
     pub capacity: usize,
     pub rotate_bytes: u64,
     pub rotate_seconds: u64,
+    pub gui_capture_seconds: u64,
     pub schedule: Schedule,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_reconnect: bool,
@@ -25,6 +26,7 @@ impl Default for Preferences {
             capacity: 32_768,
             rotate_bytes: 0,
             rotate_seconds: 0,
+            gui_capture_seconds: 0,
             schedule: Schedule::Deadline,
             auto_reconnect: false,
         }
@@ -38,6 +40,7 @@ impl Preferences {
             capacity: self.capacity,
             rotate_bytes: self.rotate_bytes,
             rotate_seconds: self.rotate_seconds,
+            duration_seconds: 0,
         }
     }
 }
@@ -58,6 +61,12 @@ pub fn profile_text(settings: &Settings, preferences: &Preferences) -> Result<St
     }
     if !(1..=1_000_000).contains(&preferences.capacity) {
         return Err("Capture capacity must be between 1 and 1,000,000 samples".into());
+    }
+    if preferences.gui_capture_seconds > capture::MAX_CAPTURE_SECONDS {
+        return Err(format!(
+            "GUI capture duration must be 0–{} seconds",
+            capture::MAX_CAPTURE_SECONDS
+        ));
     }
     let encode = || -> Result<_, toml::ser::Error> {
         let mut value = toml::Value::try_from(settings)?;

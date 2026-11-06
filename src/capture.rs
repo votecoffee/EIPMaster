@@ -8,7 +8,7 @@ use std::{
     io::{self, BufWriter, Write},
     path::PathBuf,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{
             AtomicBool, AtomicU64,
             Ordering::{Acquire, Relaxed, Release},
@@ -21,6 +21,8 @@ use std::{
 mod field_summary;
 use field_summary::FieldStats;
 pub use field_summary::FieldSummary;
+
+pub const MAX_CAPTURE_SECONDS: u64 = 3600;
 
 struct Sample {
     elapsed: u64,
@@ -35,6 +37,12 @@ struct Sample {
 struct ChangeState {
     previous: Option<(u64, [u8; MAX_ASSEMBLY_BYTES])>,
 }
+
+struct CaptureTimer {
+    duration: Duration,
+    deadline: OnceLock<Instant>,
+}
+
 pub struct Sink {
     start: Instant,
     utc: String,
@@ -42,6 +50,7 @@ pub struct Sink {
     fields: Vec<CaptureField>,
     input_size: usize,
     changes: Option<Mutex<ChangeState>>,
+    timer: Option<CaptureTimer>,
     header: String,
     stop: AtomicBool,
     failed: AtomicBool,
@@ -78,6 +87,14 @@ impl Sink {
         self.parts.load(Relaxed)
     }
 
+    pub fn duration_seconds(&self) -> Option<u64> {
+        self.timer.as_ref().map(|timer| timer.duration.as_secs())
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.timer.as_ref()?.deadline.get().copied()
+    }
+
     pub fn record(
         &self,
         stamp: Instant,
@@ -87,6 +104,11 @@ impl Sink {
         input: &[u8],
     ) {
         if stamp < self.start || input.len() != self.input_size {
+            return;
+        }
+        if let Some(timer) = &self.timer
+            && stamp >= *timer.deadline.get_or_init(|| stamp + timer.duration)
+        {
             return;
         }
         self.seen.fetch_add(1, Relaxed);
@@ -145,6 +167,7 @@ pub struct Options {
     pub capacity: usize,
     pub rotate_bytes: u64,
     pub rotate_seconds: u64,
+    pub duration_seconds: u64,
 }
 impl Capture {
     pub fn start(slot: &Slot, opts: Options, settings: &Settings) -> io::Result<Self> {
@@ -160,6 +183,12 @@ impl Capture {
         if current.is_some() || !(1..=1_000_000).contains(&opts.capacity) {
             return Err(io::Error::other(
                 "Capture already running or capacity outside 1–1,000,000",
+            ));
+        }
+        if opts.duration_seconds > MAX_CAPTURE_SECONDS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Capture duration must be 0–{MAX_CAPTURE_SECONDS} seconds"),
             ));
         }
         let fields = settings
@@ -193,6 +222,10 @@ impl Capture {
             fields,
             input_size,
             changes: (settings.capture_mode == CaptureMode::OnChange).then(Mutex::default),
+            timer: (opts.duration_seconds != 0).then(|| CaptureTimer {
+                duration: Duration::from_secs(opts.duration_seconds),
+                deadline: OnceLock::new(),
+            }),
             header,
             stop: false.into(),
             failed: false.into(),
@@ -389,6 +422,7 @@ mod tests {
                 capacity: 8,
                 rotate_bytes: 150,
                 rotate_seconds: 0,
+                duration_seconds: 0,
             },
             &settings,
             Duration::from_millis(150),
@@ -472,6 +506,7 @@ mod tests {
                 capacity: 8,
                 rotate_bytes: 0,
                 rotate_seconds: 1,
+                duration_seconds: 0,
             },
             &settings,
         )
@@ -540,6 +575,7 @@ mod tests {
                 capacity: 8,
                 rotate_bytes: 0,
                 rotate_seconds: 1,
+                duration_seconds: 0,
             },
             &Settings::default(),
         )
@@ -567,6 +603,45 @@ mod tests {
         assert_eq!(fs::read_to_string(&second).unwrap(), "existing file");
         fs::remove_file(first).unwrap();
         fs::remove_file(second).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn timed_window_starts_on_valid_input_and_keeps_its_deadline_across_generations() {
+        let dir = std::env::temp_dir().join(format!(
+            "assembly-scanner-timed-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let slot = Slot::default();
+        let mut capture = Capture::start(
+            &slot,
+            Options {
+                directory: dir.clone(),
+                capacity: 8,
+                rotate_bytes: 0,
+                rotate_seconds: 0,
+                duration_seconds: 1,
+            },
+            &Settings::default(),
+        )
+        .unwrap();
+        let sink = &capture.sink;
+        let first = sink.start + Duration::from_secs(2);
+        sink.record(first, 1, 1, 1, &[0; 3]);
+        assert_eq!(sink.deadline(), None);
+        sink.record(first, 1, 1, 1, &1u32.to_le_bytes());
+        let end = first + Duration::from_secs(1);
+        assert_eq!(sink.deadline(), Some(end));
+        sink.record(end - Duration::from_micros(1), 2, 1, 1, &2u32.to_le_bytes());
+        sink.record(end, 2, 2, 2, &3u32.to_le_bytes());
+        sink.record(end + Duration::from_secs(1), 3, 1, 1, &4u32.to_le_bytes());
+        capture.stop(&slot);
+        assert_eq!(capture.sink.seen.load(Relaxed), 2);
+        assert_eq!(capture.sink.written.load(Relaxed), 2);
+        assert_eq!(capture.sink.field_summaries()[0].last_value, "2");
+        for file in fs::read_dir(&dir).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
         fs::remove_dir(dir).unwrap();
     }
 }
