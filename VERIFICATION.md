@@ -121,6 +121,32 @@ git clone https://github.com/EIPStackGroup/OpENer.git .local/opener-upstream
 python tools/test_opener.py .\target\release\eipmaster-cli.exe .\.local\opener-upstream .\.local\opener-check
 ```
 
+## Headless bench sequence
+
+The CLI `qualify` command preserves each trial's capture report and CSV alongside the effective profiles and a cumulative receipt. The short loopback check exercised the 8 ms baseline and all three 1 ms trials. A fixture that returned 1,250 and 1,500 µs on one target trial produced a failed qualification receipt and still ran the remaining trials. An interval mismatch on the baseline stopped before the target trials. A same-model serial mismatch stopped before Forward_Open, including when the serial changed after the baseline. A profile with configuration bytes was rejected before any connection attempt.
+
+```powershell
+python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\qualification-check --qualification
+```
+
+A full headless loopback sequence requested 8,000 µs in both directions for the 15-second baseline and 1,000 µs for three 60-second trials. Forward_Open returned the corresponding requested intervals on all four runs. The receipt correctly reported a failed qualification.
+
+| Run | Sample span | End state | CSV rows | Receive sequence gaps | Scanner missed send slots | Fixture missed send slots |
+|---|---:|---|---:|---:|---:|---:|
+| 8 ms baseline | 15.008 s | Closed | 1,849 | 28 | 0 | 0 |
+| 1 ms trial 1 | 60.012 s | Closed | 50,758 | 93 | 5,178 | 9,162 |
+| 1 ms trial 2 | 38.554 s | Timed out | 36,821 | 18 | 1,000 | 1,748 |
+| 1 ms trial 3 | 16.599 s | Timed out | 15,144 | 24 | 849 | 1,470 |
+
+| Run | Receive p50 / p95 / p99 / longest (µs) | Send p50 / p95 / p99 / longest (µs) |
+|---|---:|---:|
+| 8 ms baseline | 8,010 / 9,410 / 16,069 / 19,979 | 8,010 / 9,187 / 10,098 / 16,670 |
+| 1 ms trial 1 | 1,044 / 2,485 / 4,698 / 26,259 | 1,054 / 2,001 / 2,764 / 7,728 |
+| 1 ms trial 2 | 1,022 / 1,411 / 2,600 / 21,042 | 1,030 / 1,457 / 2,123 / 7,658 |
+| 1 ms trial 3 | 1,031 / 1,768 / 3,372 / 22,904 | 1,034 / 1,755 / 2,473 / 6,515 |
+
+The fixture received Forward_Close on all four runs. All accepted packets were present in the rotated CSV parts with contiguous sample indexes. There were zero buffer overruns and disk errors. Spacing describes intervals between received packets. The terminal watchdog silence has no later packet to measure as an interval. These results are from localhost with the GUI closed.
+
 ## Physical bench acceptance
 
 Physical-device measurements require a connected bench adapter and verified device settings. First verify the Identity Object and the intended profile, preferably input-only. Confirm output ownership and write permissions before using a profile that owns outputs, asserts Run or sends configuration bytes. Then run the Windows GUI and logger with the requested RPIs and record the Forward_Open actual intervals separately from socket spacing percentiles, longest gap, sequence gaps, timeouts, missed send slots and capture losses. Use a capture at the NIC or switch if wire-level timestamps are required.

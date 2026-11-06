@@ -205,7 +205,11 @@ def serve(tcp, udp, mode, report, serial_delta=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
-    parser.add_argument("--mode", choices=("normal", "faults", "stall", "reject", "different-api", "owner", "reconnect", "recover", "replacement"), default="normal")
+    parser.add_argument("--mode", default="normal", choices=(
+        "normal", "faults", "stall", "reject", "different-api", "owner",
+        "reconnect", "recover", "replacement", "qualify", "qualify-different-api",
+        "qualify-replacement",
+    ))
     parser.add_argument("--address", type=IPv4Address, default=IPv4Address(IP))
     args = parser.parse_args()
     if not args.address.is_loopback:
@@ -217,22 +221,27 @@ def main():
         listener.listen(1)
         listener.settimeout(30)
         print("Ready on loopback", flush=True)
-        recovery = args.mode in ("recover", "replacement")
-        if recovery:
-            modes = ("stall", "normal")
+        sequences = {
+            "reconnect": ("normal", "normal"),
+            "recover": ("stall", "normal"),
+            "replacement": ("stall", "normal"),
+            "qualify": ("normal", "normal", "normal", "normal"),
+            "qualify-replacement": ("normal", "normal"),
+            "qualify-different-api": ("normal", "different-api", "normal", "normal"),
+        }
+        modes = sequences.get(args.mode, (args.mode,))
+        record_attempts = len(modes) > 1 and args.mode != "reconnect"
+        if record_attempts:
             report["attempts"] = []
-        elif args.mode == "reconnect":
-            modes = ("normal", "normal")
-        else:
-            modes = (args.mode,)
         for index, mode in enumerate(modes):
             conn, _ = listener.accept()
             with conn, socket.socket(type=socket.SOCK_DGRAM) as udp:
-                conn.settimeout(20)
+                conn.settimeout(75 if args.mode.startswith("qualify") else 20)
                 udp.bind((address, 0))
-                attempt = {"forward_close": False} if recovery else report
-                serve(conn, udp, mode, attempt, serial_delta=int(args.mode == "replacement" and index == 1))
-                if recovery:
+                attempt = {"forward_close": False} if record_attempts else report
+                replacement = args.mode in ("replacement", "qualify-replacement") and index == 1
+                serve(conn, udp, mode, attempt, serial_delta=int(replacement))
+                if record_attempts:
                     report["attempts"].append(attempt)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 

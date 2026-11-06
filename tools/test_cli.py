@@ -11,17 +11,19 @@ from join_capture import METADATA, parts_for, read_header, rows
 
 FIXTURE = Path(__file__).with_name("loopback_adapter.py")
 PROFILE = FIXTURE.parent.parent / "samples" / "loopback.toml"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def with_adapter(root, case, command):
+def with_adapter(root, case, command, mode="normal"):
     report = root / f"{case}-adapter.json"
     adapter = subprocess.Popen(
-        [sys.executable, FIXTURE, report], stdout=subprocess.PIPE, text=True
+        [sys.executable, FIXTURE, report, "--mode", mode], stdout=subprocess.PIPE, text=True,
+        creationflags=NO_WINDOW
     )
     try:
         if adapter.stdout.readline().strip() != "Ready on loopback":
             raise RuntimeError("Loopback adapter failed to start")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15, creationflags=NO_WINDOW)
         if adapter.wait(timeout=5) != 0:
             raise RuntimeError("Loopback adapter failed")
         return result, json.loads(report.read_text(encoding="utf-8"))
@@ -31,15 +33,129 @@ def with_adapter(root, case, command):
             adapter.wait()
 
 
+def check_qualification(exe, root):
+    profile = root / "source.toml"
+    source = ('capture_mode = "on_change"\n' + PROFILE.read_text(encoding="utf-8")
+              + "\n[app]\nauto_reconnect = true\n")
+    profile.write_text(source, encoding="utf-8")
+    serial = 0x12345678
+    command = [exe, "qualify", profile]
+
+    for case, mode in [("qualified", "qualify"), ("interval-mismatch", "qualify-different-api")]:
+        out = root / case
+        result, fixture = with_adapter(
+            root, case, [*command, out, "loopback", f"0:12:1:{serial}", "1"], mode
+        )
+        receipt = tomllib.loads(result.stdout)
+        assert receipt == tomllib.loads((out / "qualification.toml").read_text(encoding="utf-8"))
+        assert receipt["mode"] == "headless" and receipt["link_path"] == "loopback"
+        assert receipt["expected_identity"] == f"0:12:1:{serial}"
+        assert receipt["baseline_seconds"] == receipt["target_seconds"] == 1
+        assert receipt["finished_utc"] >= receipt["started_utc"] and "current_run" not in receipt
+        assert [trial["name"] for trial in receipt["runs"]] == receipt["planned_runs"] == [
+            "baseline-8ms", "trial-1", "trial-2", "trial-3",
+        ]
+        assert result.returncode == int(any(trial["errors"] for trial in receipt["runs"]))
+        assert receipt["outcome"] == ("passed" if result.returncode == 0 else "failed")
+        for expected_rpi, name in [(8000, "baseline-profile.toml"), (1000, "target-profile.toml")]:
+            effective = tomllib.loads((out / name).read_text(encoding="utf-8"))
+            assert effective["input_rpi_us"] == effective["output_rpi_us"] == expected_rpi
+            assert effective["capture_mode"] == "every_packet"
+            assert not effective["app"].get("auto_reconnect", False)
+        for index, (trial, adapter) in enumerate(zip(receipt["runs"], fixture["attempts"], strict=True)):
+            capture = trial["capture"]
+            assert capture == tomllib.loads((out / trial["name"] / "capture.toml").read_text(encoding="utf-8"))
+            assert capture["identity"]["serial"] == serial and adapter["forward_close"]
+            rpi = 8000 if index == 0 else 1000
+            assert capture["requested_ot_us"] == capture["requested_to_us"] == rpi
+            assert adapter["ot_requested_us"] == adapter["to_requested_us"] == rpi
+            assert capture["state"] == "Closed" and capture["duration_reached"]
+            assert capture["written"] == capture["accepted"] == capture["seen"] > 50
+            assert capture["unchanged"] == 0 and "attempts" not in capture
+            parts = parts_for(Path(capture["csv_prefix"]))
+            samples = list(rows(parts))
+            assert [int(row[2]) for row in samples] == list(range(capture["written"]))
+            assert all(int(row[6]) == int(row[4]) // 16 for row in samples)
+            assert (capture["receive_spacing"]["intervals"] == capture["accepted"] - 1
+                    and capture["send_spacing"]["intervals"] == capture["sent"] - 1)
+            if case == "interval-mismatch" and index == 1:
+                assert (capture["actual_ot_us"], capture["actual_to_us"]) == (1250, 1500)
+                assert any("Forward_Open intervals differ" in error for error in trial["errors"])
+            else:
+                assert capture["actual_ot_us"] == capture["actual_to_us"] == rpi
+        if case == "interval-mismatch":
+            assert receipt["outcome"] == "failed"
+        print(f"{case}: {receipt['outcome']}, four captures with persisted receipts")
+
+    out = root / "wrong-serial"
+    result, adapter = with_adapter(
+        root, "wrong-serial", [*command, out, "loopback", f"0:12:1:{serial + 1}", "1"]
+    )
+    receipt = tomllib.loads(result.stdout)
+    assert result.returncode == 1 and receipt["outcome"] == "failed"
+    assert len(receipt["runs"]) == 1 and not (out / "trial-1").exists()
+    capture = receipt["runs"][0]["capture"]
+    assert "Identity mismatch" in capture["identity_error"] and capture["accepted"] == 0
+    assert "ot_requested_us" not in adapter
+
+    out = root / "target-replacement"
+    result, fixture = with_adapter(
+        root, "target-replacement", [*command, out, "loopback", f"0:12:1:{serial}", "1"],
+        "qualify-replacement",
+    )
+    receipt = tomllib.loads(result.stdout)
+    assert result.returncode == 1 and receipt["outcome"] == "failed"
+    assert [run["name"] for run in receipt["runs"]] == ["baseline-8ms", "trial-1"]
+    assert not (out / "trial-2").exists()
+    assert receipt["runs"][0]["capture"]["duration_reached"]
+    assert "Identity mismatch" in receipt["runs"][1]["capture"]["identity_error"]
+    original, replacement = fixture["attempts"]
+    assert original["forward_close"] and original["serial_number"] != replacement["serial_number"]
+    assert "ot_requested_us" not in replacement
+
+    out = root / "baseline-mismatch"
+    result, adapter = with_adapter(
+        root, "baseline-mismatch", [*command, out, "loopback", f"0:12:1:{serial}", "1"],
+        "different-api",
+    )
+    receipt = tomllib.loads(result.stdout)
+    assert result.returncode == 1 and receipt["outcome"] == "failed"
+    assert len(receipt["runs"]) == 1 and not (out / "trial-1").exists()
+    assert adapter["forward_close"] and any("Forward_Open intervals differ" in error
+                                            for error in receipt["runs"][0]["errors"])
+
+    for name, args, expected_error in [
+        ("wrong-path", ["direct", f"0:12:1:{serial}"], "non-loopback addresses"),
+        ("missing-serial", ["loopback", "0:12:1", "1"], "requires decimal vendor:type:product:serial"),
+    ]:
+        out = root / name
+        result = subprocess.run([*command, out, *args], capture_output=True, text=True,
+                                timeout=5, creationflags=NO_WINDOW)
+        assert result.returncode == 1 and expected_error in result.stderr and not out.exists()
+    unsafe = root / "configuration-write.toml"
+    unsafe.write_text(source.replace("config_size = 0", "config_size = 1").replace('config_hex = ""', 'config_hex = "00"'),
+                      encoding="utf-8")
+    out = root / "configuration-write"
+    result = subprocess.run([exe, "qualify", unsafe, out, "loopback", f"0:12:1:{serial}", "1"],
+                            capture_output=True, text=True, timeout=5, creationflags=NO_WINDOW)
+    assert result.returncode == 1 and "zero configuration bytes" in result.stderr and not out.exists()
+    assert profile.read_text(encoding="utf-8") == source
+    print("Qualification rejects serial changes, baseline interval mismatches, link labels, and writes")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=Path)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--rpi-us", type=int, choices=(1000, 8000), default=8000)
+    parser.add_argument("--qualification", action="store_true", help="Exercise the four-run headless bench command")
     args = parser.parse_args()
     exe = args.exe.resolve()
     root = args.directory.resolve()
     root.mkdir(parents=True)
+    if args.qualification:
+        check_qualification(exe, root)
+        return
 
     imported = subprocess.run([exe, "eds", PROFILE.with_suffix(".eds")],
                               capture_output=True, text=True, timeout=5)

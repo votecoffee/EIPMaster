@@ -122,7 +122,7 @@ The console executable uses the same EDS importer, scanner and CSV writer as the
 .\target\release\eipmaster-cli.exe capture samples\loopback.toml .\.local\console-capture 10 0:12:1
 ```
 
-Start `python tools/loopback_adapter.py .local/adapter.json` in another console before each localhost `identity` or `capture` example. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The CLI uses the profile's buffer capacity, rotation limits and scheduler when present, and its explicit output directory argument takes precedence. Capture runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report includes the last accepted assembly payload in hex alongside its decoded value. It separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots, unchanged samples and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
+Start `python tools/loopback_adapter.py .local/adapter.json` in another console before each localhost `identity` or `capture` example. Create `.local` first if needed. For a bench run, pass the verified adapter and NIC addresses to `identity` and use the corresponding TOML profile for `capture`. The CLI uses the profile's buffer capacity, rotation limits and scheduler when present, and its explicit output directory argument takes precedence. Append the decimal serial number as a fourth field in the expected identity when you need to pin a particular unit. Capture runs for the requested number of seconds after the first accepted packet. Results are printed as TOML and saved to `capture.toml` beside the CSV. The report includes the last accepted assembly payload in hex alongside its decoded value. It separates requested and actual intervals, socket spacing, sequence gaps, skipped send slots, unchanged samples and CSV overruns. A failed or incomplete capture returns a nonzero exit code. Review the loss counters after a completed capture.
 
 For headless recovery, set `auto_reconnect = true` in the profile's `[app]` table. The CLI verifies the requested vendor, device type, and product code on the first session and pins its serial number for retries. The original capture deadline includes reconnect time. The report totals counters across attempts and includes an `[[attempts]]` entry with actual intervals and observed spacing for each generation. Top-level actual intervals and spacing refer to the final attempt. If the deadline expires during an outage, the CLI reports the incomplete capture and exits nonzero.
 
@@ -144,6 +144,20 @@ To exercise a custom profile against a localhost fixture, pass its TOML file as 
 .\target\release\assembly-scanner.exe --loopback-benchmark deadline .\.local\custom-run .\.local\profile.toml
 ```
 
+### Run the headless bench sequence
+
+`qualify` uses an input-only profile and a verified decimal `vendor:type:product:serial`. It checks the identity in the same TCP session before every Forward_Open. It runs 15 seconds at 8 ms, followed by three 60-second captures at 1 ms. Each run sets both directional RPIs, records every valid packet, and uses a fresh connection. The source profile is preserved.
+
+```powershell
+$profile = '.\.local\bench-input.toml'
+$expected = Read-Host 'Verified decimal vendor:type:product:serial'
+.\target\release\eipmaster-cli.exe qualify $profile .\.local\bench-direct-01 direct $expected
+```
+
+Use `direct` or `switched` to record the path you connected and keep the results in separate new directories. Use `loopback` with two loopback addresses for a simulator. Only the loopback mode accepts an optional final duration for quick checks.
+
+The new directory contains the effective profiles, each run's CSV and capture report, and `qualification.toml`. The summary records the active run and saves each result as it completes. A short or rejected baseline stops the sequence, as does a baseline RPI mismatch. Loss observed during a completed baseline is recorded and the 1 ms trials continue. An identity or disk error stops further connections. Exit code zero requires all four runs to finish cleanly, negotiate the requested intervals, and report zero packet anomalies or lost samples. Sender deadline skips and spacing are reported separately. These are headless results. [Physical GUI acceptance](VERIFICATION.md#physical-bench-acceptance) has its own test conditions.
+
 ## Verification
 
 Run the Rust tests and the loopback harness on Windows. The [verification notes](VERIFICATION.md) describe the upstream crate review, simulator timing and physical acceptance procedure.
@@ -152,6 +166,7 @@ The CLI functional check defaults to an 8 ms RPI. Pass `--rpi-us 1000` to exerci
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --locked --release
 python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\cli-check
+python tools/test_cli.py .\target\release\eipmaster-cli.exe .\.local\qualification-check --qualification
 python tools/test_recovery.py .\target\release\eipmaster-cli.exe .\.local\recovery-check
 ```
 

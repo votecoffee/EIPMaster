@@ -4,9 +4,10 @@ use assembly_scanner::{
     model::Settings,
     preflight,
     scanner::{
-        Connection, Identity, IdentityKey, Reconnect, Schedule, Spacing, Status, read_identity,
+        Connection, Identity, IdentityKey, IdentityPin, Reconnect, Schedule, Spacing, Status,
+        read_identity,
     },
-    settings_file,
+    settings_file::{self, Preferences},
 };
 use serde::Serialize;
 use std::{
@@ -21,16 +22,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "eipmaster-cli/qualification.rs"]
+mod qualification;
+
 const USAGE: &str = "\
 Usage:
   eipmaster-cli eds <vendor.eds>
   eipmaster-cli validate <settings.toml> [<vendor.eds> <ConnectionN>]
   eipmaster-cli identity <adapter-ipv4> <local-ipv4>
-  eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product>
+  eipmaster-cli capture <settings.toml> <new-output-dir> <seconds> <vendor:type:product[:serial]>
+  eipmaster-cli qualify <settings.toml> <new-output-dir> <direct|switched|loopback> <vendor:type:product:serial> [<loopback-seconds>]
 
 Capture requires an input-only profile. The scheduler defaults to deadline. [app].auto_reconnect opts in to input-only recovery.
 The expected Identity Object values are decimal and checked before Forward_Open.
-Seconds must be an integer from 1 to 3600.";
+Capture seconds must be an integer from 1 to 3600.
+Qualification runs 15 seconds at 8 ms and three 60-second trials at 1 ms.
+Only loopback qualification accepts a duration override from 1 to 60 seconds.";
 
 fn main() -> ExitCode {
     match run(&env::args_os().skip(1).collect::<Vec<_>>()) {
@@ -125,8 +132,26 @@ fn run(args: &[OsString]) -> Result<bool, String> {
                 .ok()
                 .filter(|n| (1..=3600).contains(n))
                 .ok_or("Seconds must be an integer from 1 to 3600")?;
-            let expected = parse_identity_key(&expected.to_string_lossy())?;
-            capture(Path::new(profile), Path::new(directory), seconds, expected)
+            let expected = parse_expected_identity(&expected.to_string_lossy())?;
+            let (settings, preferences) = load_capture_profile(Path::new(profile))?;
+            let report = capture(
+                &settings,
+                &preferences,
+                Path::new(directory),
+                seconds,
+                expected,
+            )?;
+            println!("{}", report_text(&report)?);
+            Ok(report.completed())
+        }
+        [command, profile, directory, path, expected, seconds @ ..] if command == "qualify" => {
+            qualification::run(
+                Path::new(profile),
+                Path::new(directory),
+                &path.to_string_lossy(),
+                parse_expected_identity(&expected.to_string_lossy())?,
+                seconds,
+            )
         }
         [] => {
             println!("{USAGE}");
@@ -140,19 +165,35 @@ fn run(args: &[OsString]) -> Result<bool, String> {
     }
 }
 
-fn parse_identity_key(value: &str) -> Result<IdentityKey, String> {
-    let mut numbers = value.split(':').map(str::parse::<u16>);
-    match (
-        numbers.next(),
-        numbers.next(),
-        numbers.next(),
-        numbers.next(),
-    ) {
-        (Some(Ok(vendor)), Some(Ok(device_type)), Some(Ok(product)), None) => {
-            Ok((vendor, device_type, product))
-        }
-        _ => Err("Expected decimal vendor:type:product".into()),
+#[derive(Clone, Copy)]
+struct ExpectedIdentity {
+    key: IdentityKey,
+    serial: Option<u32>,
+}
+
+fn parse_expected_identity(value: &str) -> Result<ExpectedIdentity, String> {
+    let error = "Expected decimal vendor:type:product or vendor:type:product:serial";
+    let mut parts = value.split(':');
+    let mut model_part = || {
+        parts
+            .next()
+            .and_then(|part| part.parse::<u16>().ok())
+            .ok_or(error)
+    };
+    let key = (model_part()?, model_part()?, model_part()?);
+    let serial = parts
+        .next()
+        .map(str::parse::<u32>)
+        .transpose()
+        .map_err(|_| error)?;
+    if parts.next().is_some() {
+        return Err(error.into());
     }
+    Ok(ExpectedIdentity { key, serial })
+}
+
+fn report_text(report: &impl Serialize) -> Result<String, String> {
+    toml::to_string_pretty(report).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -217,6 +258,21 @@ struct Report {
     attempts: Vec<AttemptReport>,
 }
 
+impl Report {
+    fn completed(&self) -> bool {
+        let final_accepted = self
+            .attempts
+            .last()
+            .map_or(self.accepted, |attempt| attempt.accepted);
+        self.state == "Closed"
+            && self.duration_reached
+            && final_accepted != 0
+            && self.written != 0
+            && self.written + self.unchanged == self.accepted
+            && self.disk_error.is_none()
+    }
+}
+
 #[derive(Serialize)]
 struct AttemptReport {
     generation: usize,
@@ -278,12 +334,7 @@ impl Attempt {
     }
 }
 
-fn capture(
-    profile: &Path,
-    directory: &Path,
-    seconds: u64,
-    expected: IdentityKey,
-) -> Result<bool, String> {
+fn load_capture_profile(profile: &Path) -> Result<(Settings, Preferences), String> {
     let (settings, preferences) = settings_file::load_profile(profile)?;
     let preferences = preferences.unwrap_or_default();
     settings.validate()?;
@@ -291,6 +342,16 @@ fn capture(
         return Err("Capture requires an input-only heartbeat with zero configuration bytes and O->T Run/Idle disabled".into());
     }
     settings.csv_fields()?;
+    Ok((settings, preferences))
+}
+
+fn capture(
+    settings: &Settings,
+    preferences: &Preferences,
+    directory: &Path,
+    seconds: u64,
+    expected: ExpectedIdentity,
+) -> Result<Report, String> {
     fs::create_dir(directory).map_err(|e| {
         format!(
             "Cannot create new capture directory {}: {e}",
@@ -306,13 +367,16 @@ fn capture(
     let mut capture = Capture::start(
         &slot,
         preferences.capture_options(PathBuf::from(directory)),
-        &settings,
+        settings,
     )
     .map_err(|e| e.to_string())?;
     let sink = capture.sink.clone();
     let mut attempts = Vec::new();
     let mut reconnect = None;
-    let mut pin = None;
+    let mut pin = expected.serial.map(|serial| IdentityPin {
+        key: expected.key,
+        serial,
+    });
     let mut deadline = None;
     let mut duration_reached = false;
     'capture: loop {
@@ -327,7 +391,7 @@ fn capture(
             None => Connection::start_verified_input_with_schedule(
                 settings.clone(),
                 slot.clone(),
-                expected,
+                expected.key,
                 preferences.schedule,
             ),
         };
@@ -463,16 +527,10 @@ fn capture(
             Vec::new()
         },
     };
-    let text = toml::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    let text = report_text(&report)?;
     report_file
         .write_all(text.as_bytes())
         .and_then(|_| report_file.flush())
         .map_err(|e| e.to_string())?;
-    print!("{text}");
-    Ok(report.state == "Closed"
-        && report.duration_reached
-        && status.valid != 0
-        && report.written != 0
-        && report.written + report.unchanged == report.accepted
-        && report.disk_error.is_none())
+    Ok(report)
 }
